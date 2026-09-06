@@ -19,6 +19,8 @@ class ExportWriter:
         "claude": "Claude",
         "gemini": "Gemini",
         "qwen": "Qwen",
+        "custom1": "Custom 1",
+        "custom2": "Custom 2",
     }
 
     _HASH_SEMANTIC_FIELDS = {"title", "role", "content", "timestamp"}

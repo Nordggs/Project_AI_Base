@@ -100,7 +100,7 @@ body {
 /* GRID */
 .grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: 12px;
 }
 
@@ -603,4 +603,75 @@ pre {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+/* CUSTOM API CARDS (generate & save) */
+.card.custom {
+  min-height: 420px;
+}
+.custom-config {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.custom-config .cfg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: #8b98ac;
+}
+.custom-config .cfg input,
+.custom-config .cfg select {
+  background: #0b101b;
+  border: 1px solid #1f2a3a;
+  border-radius: 6px;
+  color: #dde4ee;
+  font-size: 11px;
+  padding: 4px 6px;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+.custom-config .cfg input::placeholder,
+.custom-config textarea::placeholder {
+  color: #4a5568;
+}
+.custom-config .cfg textarea {
+  background: #0b101b;
+  border: 1px solid #1f2a3a;
+  border-radius: 6px;
+  color: #dde4ee;
+  font-size: 11px;
+  padding: 4px 6px;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 56px;
+  resize: vertical;
+  font-family: inherit;
+}
+.custom-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.custom-actions .small {
+  flex: 1;
+}
+.custom-test {
+  font-size: 11px;
+  padding: 6px;
+  border-radius: 6px;
+  margin-bottom: 6px;
+  word-break: break-word;
+  color: #8b98ac;
+}
+.custom-test.ok {
+  background: rgba(14, 165, 106, 0.12);
+  color: #0ea56a;
+}
+.custom-test.err {
+  background: rgba(229, 62, 62, 0.12);
+  color: #e53e3e;
 }

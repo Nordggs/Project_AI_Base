@@ -17,7 +17,15 @@ from adapters.deepseek import DeepSeekAdapter
 from adapters.qwen import QwenAdapter
 from adapters.chatgpt import ChatGPTAdapter
 from adapters.claude import ClaudeAdapter
+from adapters.custom import CustomAdapter
 from adapters.cdp_manager import CDPManager
+from core.custom_config import (
+    KEEP_KEY,
+    custom_config_ready,
+    load_custom_config,
+    save_custom_config,
+    sanitize_config_for_display,
+)
 from conversation.enrichment import Enricher, RuntimeData, BlobEntry, TraceEntry, AnchorData
 from exporters.writer import ExportWriter
 
@@ -268,6 +276,18 @@ class API:
     def sync_claude(self, urls_json):
         return self._app.sync_claude(urls_json)
 
+    def get_custom_config(self, slot):
+        return self._app.get_custom_config(slot)
+
+    def set_custom_config(self, slot, config_json):
+        return self._app.set_custom_config(slot, config_json)
+
+    def test_custom(self, slot, config_json):
+        return self._app.test_custom(slot, config_json)
+
+    def generate_custom(self, slot, prompt):
+        return self._app.sync_custom(slot, prompt)
+
     def connect_deepseek(self):
         return self._app.add_account("https://chat.deepseek.com/")
 
@@ -383,10 +403,13 @@ class App:
             "qwen": threading.Lock(),
             "chatgpt": threading.Lock(),
             "claude": threading.Lock(),
+            "custom1": threading.Lock(),
+            "custom2": threading.Lock(),
         }
         self._sync_state = {
             "gemini": "idle", "qwen": "idle",
             "chatgpt": "idle", "claude": "idle", "deepseek": "idle",
+            "custom1": "idle", "custom2": "idle",
         }
         self._sync_done_events = {}
         self._sync_results = {}
@@ -695,6 +718,15 @@ class App:
                         ev = self._sync_done_events.pop(name, None)
                         if ev:
                             ev.set()
+                elif cmd == "export_custom":
+                    name, prompt = arg
+                    try:
+                        res = self._export_provider(name, None, prompt=prompt)
+                        self._sync_results[name] = res or {"provider": name}
+                    finally:
+                        ev = self._sync_done_events.pop(name, None)
+                        if ev:
+                            ev.set()
                 elif cmd == "connect_qwen":
                     with self._cdp_lock:
                         self._do_connect_qwen()
@@ -851,15 +883,18 @@ class App:
             "qwen": lambda: QwenAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
             "chatgpt": lambda: ChatGPTAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
             "claude": lambda: ClaudeAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
+            "custom1": lambda: CustomAdapter(1, load_custom_config(self._config_path, 1), self._push_log, self._check_cancel),
+            "custom2": lambda: CustomAdapter(2, load_custom_config(self._config_path, 2), self._push_log, self._check_cancel),
         }
         fn = switch.get(name)
         if fn is None:
             raise ValueError(f"Unknown adapter: {name}")
         return fn()
 
-    def _export_provider(self, name, urls=None):
+    def _export_provider(self, name, urls=None, prompt=None):
         display = {"chatgpt": "ChatGPT", "deepseek": "DeepSeek", "gemini": "Gemini",
-                   "qwen": "Qwen", "claude": "Claude"}.get(name, name.title())
+                   "qwen": "Qwen", "claude": "Claude",
+                   "custom1": "Custom 1", "custom2": "Custom 2"}.get(name, name.title())
         lock = self._locks[name]
         if not lock.acquire(blocking=False):
             self.log.add(f"[WARN] {name} sync BUSY")
@@ -876,6 +911,10 @@ class App:
         result = {"provider": name, "chats": 0, "ok": 0, "errors": 0,
                   "partial": 0, "messages": 0, "skipped": 0, "cancelled": False, "error": None}
         try:
+            # ── Custom API generate path (no browser, prompt-driven) ──
+            if name.startswith("custom"):
+                return self._export_custom_generate(name, display, prompt, writer, result)
+
             if urls:
                 chats = [{"url": u} for u in dict.fromkeys(urls)]
             elif name == "deepseek":
@@ -991,6 +1030,36 @@ class App:
         if result.get("skipped"):
             parts.append(f"пропущено: {result['skipped']}")
         self._push_summary(" · ".join(parts))
+
+    def _export_custom_generate(self, name, display, prompt, writer, result):
+        """Custom API path: prompt → API → ConversationModel → writer. Errors never create files."""
+        slot = 1 if name == "custom1" else 2
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            raise RuntimeError(f"{display}: пустой промпт")
+        self._push_log(f"custom{slot}: generate...")
+        adapter = self._adapter_for(name, None)
+        model = adapter.generate(prompt)
+        path = writer.write(model, chat_order=0)
+        if path:
+            n = len(model.messages)
+            result["chats"] = 1
+            result["ok"] = 1
+            result["messages"] = n
+            self.set_sync_state(name, "done")
+            self.log.add(f"[OK] {display} → {path}")
+            self._push_log(f"[OK] {display} → {path}")
+            self._push_summary(f"✓ {display}: готово — {n} сообщений → {path}")
+        else:
+            result["errors"] = 1
+            self.set_sync_state(name, "failed")
+            self._push_log(f"{name} ERR: write failed")
+            self._push_summary(f"✗ {display}: ошибка записи файла")
+        try:
+            self.window.evaluate_js("copyLogContent()")
+        except Exception:
+            pass
+        return result
 
 
     # ── Qwen (CDP page in same browser as Gemini) ──
@@ -1501,7 +1570,56 @@ class App:
             pass
         self.log.add("[CDP] Browser closed")
 
+    # ── Custom API (generate & save) ──
+
+    def get_custom_config(self, slot):
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"invalid custom slot: {slot}")
+        # api_key never leaves the backend — only has_api_key flag.
+        return sanitize_config_for_display(load_custom_config(self._config_path, slot))
+
+    def set_custom_config(self, slot, config_json):
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"invalid custom slot: {slot}")
+        new_cfg = json.loads(config_json)
+        old = load_custom_config(self._config_path, slot)
+        key = str(new_cfg.get("api_key", "") or "").strip()
+        if key == KEEP_KEY:
+            new_cfg["api_key"] = old.get("api_key", "")
+        save_custom_config(self._config_path, slot, new_cfg)
+        # No api_key in logs.
+        self.log.add(f"[INFO] Custom{slot} config saved: endpoint={new_cfg.get('endpoint', '')}, model={new_cfg.get('model', '')}")
+        return "OK"
+
+    def test_custom(self, slot, config_json):
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"invalid custom slot: {slot}")
+        cfg = json.loads(config_json)
+        adapter = CustomAdapter(slot, cfg, self._push_log)
+        return adapter.test_connection()
+
+    def sync_custom(self, slot, prompt):
+        name = f"custom{int(slot)}"
+        cfg = load_custom_config(self._config_path, int(slot))
+        if not (str(cfg.get("endpoint", "")).strip() and str(cfg.get("model", "")).strip()):
+            raise RuntimeError(f"Custom {slot}: заполните Endpoint и Model, затем сохраните настройки")
+        if not prompt or not str(prompt).strip():
+            raise RuntimeError(f"Custom {slot}: пустой промпт")
+        if not self._locks[name].acquire(blocking=False):
+            raise RuntimeError(f"Custom {slot}: генерация уже выполняется")
+        self._locks[name].release()
+        self.log.add(f"[INFO] Enqueuing Custom{slot} generation")
+        self._gw_queue.put(("export_custom", (name, str(prompt))))
+        return "STARTED"
+
     def _is_provider_connected(self, name):
+        if name in ("custom1", "custom2"):
+            # Custom is "ready" when its config has endpoint + model (no connection state).
+            slot = 1 if name == "custom1" else 2
+            return custom_config_ready(self._config_path, slot)
         return {
             "deepseek": self.pw is not None,
             "gemini": self._gemini_connect_state == "connected",

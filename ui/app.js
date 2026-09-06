@@ -370,11 +370,129 @@ function setSyncRunning(running) {
 }
 
 function setProviderSync(provider, status) {
-  var map = { 'gemini':'Gemini', 'qwen':'Qwen', 'chatgpt':'ChatGPT', 'claude':'Claude', 'deepseek':'DeepSeek' };
+  var map = { 'gemini':'Gemini', 'qwen':'Qwen', 'chatgpt':'ChatGPT', 'claude':'Claude', 'deepseek':'DeepSeek',
+              'custom1':'Custom1', 'custom2':'Custom2' };
   var dot = document.getElementById('pv' + map[provider]);
   if (!dot) return;
   var cls = { 'idle':'dot-off', 'running':'dot-syncing', 'done':'dot-on', 'failed':'dot-failed' };
   dot.className = 'pv-dot ' + (cls[status] || 'dot-off');
+}
+
+// ── Custom API (generate & save) ──
+
+var CUSTOM_MASK = "••••••••";
+var CUSTOM_KEEP = "__KEEP__"; // sentinel: backend keeps the stored key
+
+function _customPrefix(slot) { return slot === 1 ? "c1" : "c2"; }
+
+function _customCollect(slot) {
+  var p = _customPrefix(slot);
+  var keyField = document.getElementById(p + "ApiKey");
+  var keyVal = keyField.value.trim();
+  var hasKey = keyField.dataset.hasKey === "1";
+  // untouched mask or empty field with a stored key → keep stored key
+  var apiKey = ((keyVal === CUSTOM_MASK && hasKey) || (keyVal === "" && hasKey)) ? CUSTOM_KEEP : keyVal;
+  var timeout = parseInt(document.getElementById(p + "Timeout").value, 10);
+  return {
+    endpoint: document.getElementById(p + "Endpoint").value.trim(),
+    protocol: document.getElementById(p + "Protocol").value,
+    model: document.getElementById(p + "Model").value.trim(),
+    api_key: apiKey,
+    system_prompt: document.getElementById(p + "SystemPrompt").value,
+    timeout: (timeout >= 5 && timeout <= 300) ? timeout : 30
+  };
+}
+
+function _customApply(slot, cfg) {
+  var p = _customPrefix(slot);
+  cfg = cfg || {};
+  document.getElementById(p + "Endpoint").value = cfg.endpoint || "";
+  document.getElementById(p + "Protocol").value = cfg.protocol || "openai";
+  document.getElementById(p + "Model").value = cfg.model || "";
+  var keyField = document.getElementById(p + "ApiKey");
+  keyField.value = cfg.has_api_key ? CUSTOM_MASK : "";
+  keyField.dataset.hasKey = cfg.has_api_key ? "1" : "0";
+  document.getElementById(p + "SystemPrompt").value = cfg.system_prompt || "";
+  document.getElementById(p + "Timeout").value = cfg.timeout || 30;
+  _customRefreshBadge(slot, cfg);
+}
+
+function _customRefreshBadge(slot, cfg) {
+  var badge = document.getElementById(_customPrefix(slot) + "Badge");
+  var ready = cfg && cfg.endpoint && cfg.model;
+  badge.textContent = ready ? "готов" : "не настроен";
+  badge.className = ready ? "badge ok" : "badge";
+}
+
+function loadCustomConfigs() {
+  [1, 2].forEach(function(slot) {
+    if (!window.pywebview) return;
+    window.pywebview.api.get_custom_config(slot).then(function(cfg) {
+      _customApply(slot, cfg);
+    }).catch(function(err) { log("custom" + slot + ": config load failed: " + err); });
+  });
+}
+
+function saveCustom(slot) {
+  if (!window.pywebview) return Promise.reject("no bridge");
+  var cfg = _customCollect(slot);
+  return window.pywebview.api.set_custom_config(slot, JSON.stringify(cfg)).then(function() {
+    log("custom" + slot + ": настройки сохранены");
+    return window.pywebview.api.get_custom_config(slot).then(function(saved) {
+      _customApply(slot, saved);
+      return saved;
+    });
+  }, function(err) {
+    log("custom" + slot + ": сохранение не удалось: " + err);
+    throw err;
+  });
+}
+
+function testCustom(slot) {
+  var resBox = document.getElementById(_customPrefix(slot) + "TestResult");
+  resBox.classList.remove("hidden");
+  resBox.className = "custom-test";
+  resBox.textContent = "проверка...";
+  var cfg = _customCollect(slot);
+  if (!cfg.endpoint || !cfg.model) {
+    resBox.textContent = "✗ Укажите Endpoint и Model";
+    resBox.className = "custom-test err";
+    return;
+  }
+  window.pywebview.api.test_custom(slot, JSON.stringify(cfg)).then(function(res) {
+    res = res || {};
+    if (res.ok) {
+      resBox.textContent = "✓ Connection OK — model: " + (res.model || "?") + " · ответ: " + (res.response || "");
+      resBox.className = "custom-test ok";
+    } else {
+      resBox.textContent = "✗ " + (res.error || "неизвестная ошибка") + (res.http_status ? " [HTTP " + res.http_status + "]" : "");
+      resBox.className = "custom-test err";
+    }
+  }, function(err) {
+    resBox.textContent = "✗ " + err;
+    resBox.className = "custom-test err";
+  });
+}
+
+function generateCustom(slot) {
+  var prompt = document.getElementById(_customPrefix(slot) + "Prompt").value.trim();
+  if (!prompt) {
+    log("custom" + slot + ": введите промпт");
+    return;
+  }
+  var btn = document.getElementById(slot === 1 ? "btnCustom1Gen" : "btnCustom2Gen");
+  btn.disabled = true;
+  btn.textContent = "Generating...";
+  saveCustom(slot).then(function() {
+    return window.pywebview.api.generate_custom(slot, prompt);
+  }).then(function() {
+    btn.disabled = false;
+    btn.textContent = "Generate & Save";
+  }, function(err) {
+    log("custom" + slot + ": " + err);
+    btn.disabled = false;
+    btn.textContent = "Generate & Save";
+  });
 }
 
 function reconnect() {
@@ -850,6 +968,7 @@ document.addEventListener("DOMContentLoaded", function() {
   setTimeout(refreshOutputDir, 300);
   setTimeout(refreshVersion, 400);
   setTimeout(checkForUpdate, 2000);
+  setTimeout(loadCustomConfigs, 600);
 
   // Qwen DnD fix for pywebview — explicit event handlers for textarea
   const qw = document.getElementById("qwUrls");

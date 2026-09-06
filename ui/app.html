@@ -106,6 +106,8 @@
         <span class="pv-item"><span id="pvChatGPT" class="pv-dot dot-off">○</span> ChatGPT</span>
         <span class="pv-item"><span id="pvClaude" class="pv-dot dot-off">○</span> Claude</span>
         <span class="pv-item"><span id="pvDeepSeek" class="pv-dot dot-off">○</span> DeepSeek</span>
+        <span class="pv-item"><span id="pvCustom1" class="pv-dot dot-off">○</span> Custom 1</span>
+        <span class="pv-item"><span id="pvCustom2" class="pv-dot dot-off">○</span> Custom 2</span>
       </span>
     </div>
 
@@ -275,6 +277,96 @@
         </div>
 
         <button id="btnSyncSelected" class="primary" disabled onclick="syncSelected()">Синхронизировать выбранный чат</button>
+      </div>
+
+      <!-- CUSTOM 1 (API: generate & save) -->
+      <div class="card custom">
+        <div class="card-header">
+          <h2>Custom 1</h2>
+          <span class="badge" id="c1Badge">не настроен</span>
+        </div>
+
+        <div class="custom-config">
+          <label class="cfg">Endpoint
+            <input id="c1Endpoint" placeholder="https://api.perplexity.ai/chat/completions" />
+          </label>
+          <label class="cfg">Protocol
+            <select id="c1Protocol">
+              <option value="openai">OpenAI Chat Completions</option>
+              <option value="anthropic">Anthropic Messages</option>
+            </select>
+          </label>
+          <label class="cfg">Model
+            <input id="c1Model" placeholder="sonar-pro" />
+          </label>
+          <label class="cfg">API Key
+            <input id="c1ApiKey" type="password" placeholder="sk-..." />
+          </label>
+          <label class="cfg">System Prompt
+            <input id="c1SystemPrompt" placeholder="необязательно" />
+          </label>
+          <label class="cfg">Timeout (сек)
+            <input id="c1Timeout" type="number" value="30" min="5" max="300" />
+          </label>
+        </div>
+
+        <div class="custom-actions">
+          <button class="small" onclick="saveCustom(1)">Сохранить</button>
+          <button class="small" onclick="testCustom(1)">Test</button>
+        </div>
+        <div id="c1TestResult" class="custom-test hidden"></div>
+
+        <label class="cfg">Prompt
+          <textarea id="c1Prompt" placeholder="Ваш промпт для модели..."></textarea>
+        </label>
+
+        <button id="btnCustom1Gen" class="primary" onclick="generateCustom(1)">Generate &amp; Save</button>
+        <button id="btnStopC1" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+      </div>
+
+      <!-- CUSTOM 2 (API: generate & save) -->
+      <div class="card custom">
+        <div class="card-header">
+          <h2>Custom 2</h2>
+          <span class="badge" id="c2Badge">не настроен</span>
+        </div>
+
+        <div class="custom-config">
+          <label class="cfg">Endpoint
+            <input id="c2Endpoint" placeholder="https://api.anthropic.com/v1/messages" />
+          </label>
+          <label class="cfg">Protocol
+            <select id="c2Protocol">
+              <option value="openai">OpenAI Chat Completions</option>
+              <option value="anthropic">Anthropic Messages</option>
+            </select>
+          </label>
+          <label class="cfg">Model
+            <input id="c2Model" placeholder="claude-sonnet-4-5" />
+          </label>
+          <label class="cfg">API Key
+            <input id="c2ApiKey" type="password" placeholder="sk-ant-..." />
+          </label>
+          <label class="cfg">System Prompt
+            <input id="c2SystemPrompt" placeholder="необязательно" />
+          </label>
+          <label class="cfg">Timeout (сек)
+            <input id="c2Timeout" type="number" value="30" min="5" max="300" />
+          </label>
+        </div>
+
+        <div class="custom-actions">
+          <button class="small" onclick="saveCustom(2)">Сохранить</button>
+          <button class="small" onclick="testCustom(2)">Test</button>
+        </div>
+        <div id="c2TestResult" class="custom-test hidden"></div>
+
+        <label class="cfg">Prompt
+          <textarea id="c2Prompt" placeholder="Ваш промпт для модели..."></textarea>
+        </label>
+
+        <button id="btnCustom2Gen" class="primary" onclick="generateCustom(2)">Generate &amp; Save</button>
+        <button id="btnStopC2" class="danger" onclick="cancelAll()">⏹ Остановить</button>
       </div>
 
     </div>
