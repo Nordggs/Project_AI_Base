@@ -288,6 +288,27 @@ class API:
     def generate_custom(self, slot, prompt):
         return self._app.sync_custom(slot, prompt)
 
+    def connect_custom_web(self, slot, url):
+        return self._app.connect_custom_web(slot, url)
+
+    def disconnect_custom_web(self, slot):
+        return self._app.disconnect_custom_web(slot)
+
+    def scan_custom_web(self, slot):
+        return self._app.scan_custom_web(slot)
+
+    def export_custom_web(self, slot, urls_json="[]"):
+        import json as _json
+        slot = int(slot)
+        if self._app._get_custom_mode(slot) != "web":
+            raise RuntimeError(f"Custom{slot}: not in web mode")
+        if not getattr(self._app, f"_custom{slot}_connected", False):
+            raise RuntimeError(f"Custom{slot}: not connected")
+        urls = _json.loads(urls_json) if isinstance(urls_json, str) else urls_json
+        name = f"custom{slot}"
+        self._app._gw_queue.put(("export_provider", (name, urls)))
+        return "STARTED"
+
     def connect_deepseek(self):
         return self._app.add_account("https://chat.deepseek.com/")
 
@@ -472,6 +493,12 @@ class App:
         self._connect_claude_done = threading.Event()
         self._claude_export_active = False
         self._claude_session_epoch = 0
+
+        # Custom Web providers
+        self.custom1_page = None
+        self.custom2_page = None
+        self._custom1_connected = False
+        self._custom2_connected = False
 
         # CDP Manager — единый Chrome для всех провайдеров
         self._file_log = None
@@ -685,14 +712,16 @@ class App:
             try:
                 if cmd == "connect_gemini":      self._do_connect_gemini(arg)
                 elif cmd == "soft_stop":
-                    for page in [self.qwen_page, self.gemini_page, self.chatgpt_page, self.claude_page]:
+                    for page in [self.qwen_page, self.gemini_page, self.chatgpt_page, self.claude_page,
+                                 getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
                         try:
                             if page:
                                 page.evaluate("window.stop()")
                         except Exception:
                             pass
                 elif cmd == "close_cdp":
-                    for page in [self.gemini_page, self.qwen_page, self.chatgpt_page, self.claude_page]:
+                    for page in [self.gemini_page, self.qwen_page, self.chatgpt_page, self.claude_page,
+                                 getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
                         try:
                             if page:
                                 page.close()
@@ -739,6 +768,58 @@ class App:
                     with self._cdp_lock:
                         self._do_connect_claude()
                     self._connect_claude_done.set()
+                elif cmd == "connect_custom1":
+                    try:
+                        with self._cdp_lock:
+                            self._do_connect_custom(1, arg)
+                    except Exception as e:
+                        self._sync_results["connect_custom1_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("connect_custom1", None)
+                        if ev:
+                            ev.set()
+                elif cmd == "connect_custom2":
+                    try:
+                        with self._cdp_lock:
+                            self._do_connect_custom(2, arg)
+                    except Exception as e:
+                        self._sync_results["connect_custom2_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("connect_custom2", None)
+                        if ev:
+                            ev.set()
+                elif cmd == "disconnect_custom1":
+                    self._do_disconnect_custom(1)
+                    ev = self._sync_done_events.pop("disconnect_custom1", None)
+                    if ev:
+                        ev.set()
+                elif cmd == "disconnect_custom2":
+                    self._do_disconnect_custom(2)
+                    ev = self._sync_done_events.pop("disconnect_custom2", None)
+                    if ev:
+                        ev.set()
+                elif cmd == "scan_custom1":
+                    try:
+                        chats = self._do_scan_custom(1)
+                        self._sync_results["scan_custom1"] = chats
+                    except Exception as e:
+                        self._sync_results["scan_custom1"] = []
+                        self._sync_results["scan_custom1_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("scan_custom1", None)
+                        if ev:
+                            ev.set()
+                elif cmd == "scan_custom2":
+                    try:
+                        chats = self._do_scan_custom(2)
+                        self._sync_results["scan_custom2"] = chats
+                    except Exception as e:
+                        self._sync_results["scan_custom2"] = []
+                        self._sync_results["scan_custom2_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("scan_custom2", None)
+                        if ev:
+                            ev.set()
             except Exception as e:
                 self.log.add(f"[ERROR] _gw_worker cmd={cmd}: {e}")
                 self._push_log(f"Gemini ERR: {e}")
@@ -750,6 +831,14 @@ class App:
                     self._connect_chatgpt_done.set()
                 elif cmd == "connect_claude":
                     self._connect_claude_done.set()
+                elif cmd.startswith("connect_custom"):
+                    ev = self._sync_done_events.pop(cmd, None)
+                    if ev:
+                        ev.set()
+                elif cmd.startswith("scan_custom"):
+                    ev = self._sync_done_events.pop(cmd, None)
+                    if ev:
+                        ev.set()
 
     def _do_connect(self, url):
         self.log.add("[INFO] Connecting DeepSeek account...")
@@ -874,17 +963,24 @@ class App:
             "qwen": self.qwen_page,
             "chatgpt": self.chatgpt_page,
             "claude": self.claude_page,
+            "custom1": getattr(self, "custom1_page", None),
+            "custom2": getattr(self, "custom2_page", None),
         }.get(name)
 
     def _adapter_for(self, name, page):
+        if name in ("custom1", "custom2"):
+            slot = 1 if name == "custom1" else 2
+            cfg = load_custom_config(self._config_path, slot)
+            if str(cfg.get("mode", "api")).strip().lower() == "web":
+                from adapters.custom_web import CustomWebAdapter
+                return CustomWebAdapter(page, cfg, self._push_log, self._check_cancel)
+            return CustomAdapter(slot, cfg, self._push_log, self._check_cancel)
         switch = {
             "deepseek": lambda: DeepSeekAdapter(page, self.log, self._check_cancel),
             "gemini": lambda: GeminiAdapter(page, self._push_log, self._check_cancel, self._cancel_version),
             "qwen": lambda: QwenAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
             "chatgpt": lambda: ChatGPTAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
             "claude": lambda: ClaudeAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
-            "custom1": lambda: CustomAdapter(1, load_custom_config(self._config_path, 1), self._push_log, self._check_cancel),
-            "custom2": lambda: CustomAdapter(2, load_custom_config(self._config_path, 2), self._push_log, self._check_cancel),
         }
         fn = switch.get(name)
         if fn is None:
@@ -913,10 +1009,25 @@ class App:
         try:
             # ── Custom API generate path (no browser, prompt-driven) ──
             if name.startswith("custom"):
-                return self._export_custom_generate(name, display, prompt, writer, result)
+                slot = 1 if name == "custom1" else 2
+                if self._get_custom_mode(slot) == "web":
+                    pass  # fall through to browser pipeline below
+                else:
+                    return self._export_custom_generate(name, display, prompt, writer, result)
 
             if urls:
-                chats = [{"url": u} for u in dict.fromkeys(urls)]
+                seen = set()
+                chats = []
+                for u in urls:
+                    if isinstance(u, dict):
+                        key = u.get("url") or f"__idx{u.get('_index', '')}"
+                        if key not in seen:
+                            seen.add(key)
+                            chats.append(u)
+                    else:
+                        if u not in seen:
+                            seen.add(u)
+                            chats.append({"url": u})
             elif name == "deepseek":
                 urls = self._discover_sidebar_urls()
                 chats = [{"url": u} for u in urls]
@@ -1547,11 +1658,15 @@ class App:
         self.qwen_page = None
         self.chatgpt_page = None
         self.claude_page = None
+        self.custom1_page = None
+        self.custom2_page = None
         self.pw = None
         self._gemini_connect_state = "idle"
         self._qwen_connected = False
         self._chatgpt_connected = False
         self._claude_connected = False
+        self._custom1_connected = False
+        self._custom2_connected = False
         self._seen_urls.clear()
         self._last_watched_url = ""
         try:
@@ -1615,10 +1730,103 @@ class App:
         self._gw_queue.put(("export_custom", (name, str(prompt))))
         return "STARTED"
 
+    # ── Custom Web (browser-based) ──
+
+    def _get_custom_mode(self, slot):
+        cfg = load_custom_config(self._config_path, slot)
+        return str(cfg.get("mode", "api")).strip().lower() or "api"
+
+    def _do_connect_custom(self, slot, url):
+        page_attr = f"custom{slot}_page"
+        setattr(self, f"_custom{slot}_connected", False)
+        old_page = getattr(self, page_attr, None)
+        if old_page:
+            try:
+                old_page.close()
+            except Exception:
+                pass
+            setattr(self, page_attr, None)
+
+        browser = self._cdp_browser()
+        page = browser.contexts[0].new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        page.wait_for_load_state("domcontentloaded")
+
+        if not self._is_page_alive(page):
+            raise RuntimeError("Page not alive")
+
+        setattr(self, page_attr, page)
+        setattr(self, f"_custom{slot}_connected", True)
+        self.log.add(f"[INFO] Custom{slot} connected to {url}")
+
+    def _do_disconnect_custom(self, slot):
+        page_attr = f"custom{slot}_page"
+        page = getattr(self, page_attr, None)
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+        setattr(self, page_attr, None)
+        setattr(self, f"_custom{slot}_connected", False)
+        self.log.add(f"[INFO] Custom{slot} disconnected")
+
+    def _do_scan_custom(self, slot):
+        page_attr = f"custom{slot}_page"
+        page = getattr(self, page_attr, None)
+        if not page:
+            return []
+        cfg = load_custom_config(self._config_path, slot)
+        from adapters.custom_web import CustomWebAdapter
+        adapter = CustomWebAdapter(page, cfg, self._push_log)
+        return adapter.list_chats()
+
+    def connect_custom_web(self, slot, url):
+        slot = int(slot)
+        self._sync_results.pop(f"connect_custom{slot}_error", None)
+        ev = threading.Event()
+        self._sync_done_events[f"connect_custom{slot}"] = ev
+        self._gw_queue.put((f"connect_custom{slot}", url))
+        timed_out = not ev.wait(timeout=30)
+        err = self._sync_results.pop(f"connect_custom{slot}_error", None)
+        if timed_out:
+            self._push_log(f"custom{slot}: connect timeout (30s)")
+            raise RuntimeError(f"Custom{slot}: connect timeout")
+        if err:
+            raise RuntimeError(err)
+        page = getattr(self, f"custom{slot}_page", None)
+        if not page:
+            raise RuntimeError(f"Custom{slot}: page not created")
+        return "OK"
+
+    def disconnect_custom_web(self, slot):
+        slot = int(slot)
+        ev = threading.Event()
+        self._sync_done_events[f"disconnect_custom{slot}"] = ev
+        self._gw_queue.put((f"disconnect_custom{slot}", ""))
+        ev.wait(timeout=10)
+        return "OK"
+
+    def scan_custom_web(self, slot):
+        slot = int(slot)
+        if not getattr(self, f"_custom{slot}_connected", False):
+            return []
+        ev = threading.Event()
+        self._sync_done_events[f"scan_custom{slot}"] = ev
+        self._gw_queue.put((f"scan_custom{slot}", ""))
+        ev.wait(timeout=15)
+        err = self._sync_results.pop(f"scan_custom{slot}_error", None)
+        if err:
+            self._push_log(f"custom{slot} scan error: {err}")
+            return []
+        return self._sync_results.pop(f"scan_custom{slot}", [])
+
     def _is_provider_connected(self, name):
         if name in ("custom1", "custom2"):
-            # Custom is "ready" when its config has endpoint + model (no connection state).
             slot = 1 if name == "custom1" else 2
+            mode = self._get_custom_mode(slot)
+            if mode == "web":
+                return getattr(self, f"_custom{slot}_connected", False)
             return custom_config_ready(self._config_path, slot)
         return {
             "deepseek": self.pw is not None,
@@ -1642,6 +1850,10 @@ class App:
             pass
         self.log.add("[INFO] Sync All — ChatGPT → Gemini → Claude → Qwen → DeepSeek")
         order = ["chatgpt", "gemini", "claude", "qwen", "deepseek"]
+        for slot in (1, 2):
+            name = f"custom{slot}"
+            if self._is_provider_connected(name) and self._get_custom_mode(slot) == "web":
+                order.append(name)
         events = {}
         for name in order:
             if not self._is_provider_connected(name):

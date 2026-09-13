@@ -1,24 +1,26 @@
-# Architecture — AI Chat Exporter v0.5.0
+# Architecture — AI Chat Exporter v0.6.0
 
 ## Overview
 
-Desktop application that exports AI chat dialogs from five providers (**ChatGPT, Gemini, Claude, Qwen, DeepSeek**) into local Markdown files. No API keys and no cloud services — the app drives a real browser through Chrome DevTools Protocol (CDP) and Playwright, reads the rendered page, and normalizes the content into a unified conversation model.
+Desktop application that exports AI chat dialogs from five providers (**ChatGPT, Gemini, Claude, Qwen, DeepSeek**) plus **Custom Web** (user-configurable browser-based export) into local Markdown files. No API keys and no cloud services — the app drives a real browser through Chrome DevTools Protocol (CDP) and Playwright, reads the rendered page, and normalizes the content into a unified conversation model.
+
+Custom Web mode also supports an API path for two arbitrary LLM endpoints (Custom 1 / Custom 2), where the app sends prompts and saves responses as Markdown.
 
 ```
 UI (pywebview) ── window.pywebview.api.* ──> main.py App
                                               │
-                    ┌─────────────────────────┴──────────────────────────┐
-                    ▼                                                     ▼
-             _pw_worker (thread)                                  _gw_worker (thread)
-             DeepSeekAdapter                                        Gemini / Qwen / ChatGPT / Claude
-             own Playwright + CDPContext                            shared CDP browser (own Playwright)
-                    │                                                     │
-                    ▼                                                     ▼
-             DeepSeekExporter                                 adapters (list_chats → open_chat → extract_chat)
-                    │                                                     │
-                    └──────────────┬──────────────────────────────────────┘
-                                   ▼
-                          conversation/ pipeline
+                     ┌────────────────────────┴──────────────────────────┐
+                     ▼                                                    ▼
+              _pw_worker (thread)                                 _gw_worker (thread)
+              DeepSeekAdapter                                     Gemini / Qwen / ChatGPT / Claude / Custom Web
+              own Playwright + CDPContext                           shared CDP browser (own Playwright)
+                     │                                                    │
+                     ▼                                                    ▼
+              DeepSeekExporter                                adapters (list_chats → open_chat → extract_chat)
+                     │                                                    │
+                     └──────────────┬─────────────────────────────────────┘
+                                    ▼
+                           conversation/ pipeline
                     IRBuilder → ConversationModel → Enricher → Validator
                                    │
                                    ▼
@@ -32,16 +34,19 @@ UI (pywebview) ── window.pywebview.api.* ──> main.py App
 | `ui/` | Desktop UI (HTML/JS/CSS) rendered by pywebview |
 | `main.py` | Application orchestration: workers, queues, sync state, cancel |
 | `adapters/` | Browser lifecycle (`cdp_manager.py`) + per-provider adapters |
+| `adapters/custom_web.py` | Custom Web adapter with SelectorStrategy / ScriptStrategy |
+| `adapters/custom.py` | Custom API adapter (send prompt → save response) |
 | `conversation/` | Unified data model and enrichment pipeline |
 | `exporters/` | Page extraction scripts + markdown writer + attachment capture |
-| `core/` | Thread-safe logging (`LogBuffer`) |
+| `core/` | Thread-safe logging (`LogBuffer`), config helpers (`custom_config.py`) |
 
 ## Runtime model
 
 - **CDPManager** (`adapters/cdp_manager.py`) owns the Chrome process only — no Playwright, no pages. It resolves Chrome in order **bundled → system → `RuntimeError`**, launches it with `--remote-debugging-port=9222` and a persistent profile (`~/.ai_pipeline/chrome_gemini`), so logins survive restarts.
-- **Two worker threads**: `_pw_worker` runs DeepSeek with its own Playwright instance and a `CDPContext` wrapper (single window); `_gw_worker` runs Gemini, Qwen, ChatGPT and Claude against the shared CDP browser.
+- **Two worker threads**: `_pw_worker` runs DeepSeek with its own Playwright instance and a `CDPContext` wrapper (single window); `_gw_worker` runs Gemini, Qwen, ChatGPT, Claude, and Custom Web against the shared CDP browser.
 - Each provider has its own lock (`_locks[provider]`, non-blocking) — exporting one provider never blocks another.
 - Cancellation is a single global flag (`_cancel_flag` + `_cancel_version` token) applied in three layers: cooperative `_check_cancel()` in loops → `_soft_stop()` (`window.stop()` on all pages) → versioned `pw_call()` wrapper for Playwright I/O.
+- **Custom Web lifecycle**: connect/disconnect/scan commands go through `_gw_queue` to run in `_gw_worker` (Playwright thread affinity). `_custom1_connected` / `_custom2_connected` flags track connection state; `_is_provider_connected` reads flags, not `page.evaluate`. Export via `_export_provider` handles both URL strings and `{url, _index}` dicts to preserve sidebar position for non-href elements.
 
 ## Provider integration
 
@@ -52,8 +57,10 @@ UI (pywebview) ── window.pywebview.api.* ──> main.py App
 | Claude | `ClaudeAdapter` | Adapter path: sidebar scan + click-through. DOM extraction with a fallback pass when assistant messages lack marker attributes |
 | Qwen | `QwenAdapter` | Sidebar DOM FSM (click → wait for messages in URL). Extraction: DOM scroll-loop with CDP `DOMSnapshot` fallback |
 | DeepSeek | `DeepSeekAdapter` | Own worker thread; `DeepSeekExporter` scroll engine over the conversation page |
+| Custom Web | `CustomWebAdapter` | User-configurable: `SelectorStrategy` (CSS selectors) or `ScriptStrategy` (custom JS). Shared CDP browser. Connect/disconnect/scan lifecycle. |
+| Custom 1/2 (API) | `CustomAdapter` | Send prompt via HTTP (OpenAI or Anthropic protocol), save response as Markdown. No browser required. |
 
-ChatGPT and Claude connect through the shared CDP context (`_cdp_browser().contexts[0]`); Gemini and Qwen share the same browser context. A `_cdp_lock` protects browser-level operations (`new_page` + `goto`) only — not the whole export.
+ChatGPT and Claude connect through the shared CDP context (`_cdp_browser().contexts[0]`); Gemini, Qwen, and Custom Web share the same browser context. A `_cdp_lock` protects browser-level operations (`new_page` + `goto`) only — not the whole export.
 
 ## Conversation pipeline (`conversation/`)
 
@@ -121,7 +128,9 @@ Release builds are PyInstaller `onedir` packages that ship their own Chromium:
 │   ├── claude.py                # ClaudeAdapter
 │   ├── qwen.py                  # QwenAdapter
 │   ├── gemini.py                # GeminiAdapter
-│   └── deepseek.py              # DeepSeekAdapter
+│   ├── deepseek.py              # DeepSeekAdapter
+│   ├── custom.py                # CustomAdapter (API mode: send prompt → save)
+│   └── custom_web.py            # CustomWebAdapter + SelectorStrategy + ScriptStrategy
 ├── conversation/
 │   ├── models.py                # ConversationModel (core)
 │   ├── irbuilder.py             # IRBuilder: adapter → ConversationModel
@@ -137,9 +146,10 @@ Release builds are PyInstaller `onedir` packages that ship their own Chromium:
 │   ├── deepseek.py              # DeepSeekExporter
 │   └── attachment_capture.py    # CDP attachment capture
 ├── core/
-│   └── logger.py                # LogBuffer (thread-safe)
+│   ├── logger.py                # LogBuffer (thread-safe)
+│   └── custom_config.py         # DEFAULT_SLOT, load/save custom config
 ├── ui/
-│   ├── app.html                 # UI layout
+│   ├── app.html                 # UI layout (mode toggle, web fields)
 │   ├── app.js                   # UI logic + pywebview bridge
 │   ├── app.css                  # Styles + splash
 │   └── icon.ico                 # Window icon

@@ -387,39 +387,94 @@ function _customPrefix(slot) { return slot === 1 ? "c1" : "c2"; }
 
 function _customCollect(slot) {
   var p = _customPrefix(slot);
-  var keyField = document.getElementById(p + "ApiKey");
-  var keyVal = keyField.value.trim();
-  var hasKey = keyField.dataset.hasKey === "1";
-  // untouched mask or empty field with a stored key → keep stored key
-  var apiKey = ((keyVal === CUSTOM_MASK && hasKey) || (keyVal === "" && hasKey)) ? CUSTOM_KEEP : keyVal;
-  var timeout = parseInt(document.getElementById(p + "Timeout").value, 10);
-  return {
-    endpoint: document.getElementById(p + "Endpoint").value.trim(),
-    protocol: document.getElementById(p + "Protocol").value,
-    model: document.getElementById(p + "Model").value.trim(),
-    api_key: apiKey,
-    system_prompt: document.getElementById(p + "SystemPrompt").value,
-    timeout: (timeout >= 5 && timeout <= 300) ? timeout : 30
-  };
+  var mode = document.getElementById(p + "Mode").value;
+  var cfg = { mode: mode };
+  if (mode === "web") {
+    cfg.url = document.getElementById(p + "Url").value.trim();
+    cfg.chat_list_selector = document.getElementById(p + "ChatListSelector").value.trim();
+    cfg.title_selector = document.getElementById(p + "TitleSelector").value.trim();
+    cfg.message_selector = document.getElementById(p + "MessageSelector").value.trim();
+    cfg.user_message_selector = document.getElementById(p + "UserMessageSelector").value.trim();
+    cfg.assistant_message_selector = document.getElementById(p + "AssistantMessageSelector").value.trim();
+    cfg.scroll_container_selector = document.getElementById(p + "ScrollContainerSelector").value.trim();
+    cfg.wait_after_click_ms = parseInt(document.getElementById(p + "WaitAfterClickMs").value, 10) || 2000;
+    cfg.list_chats_js = document.getElementById(p + "ListChatsJs").value;
+    cfg.extract_messages_js = document.getElementById(p + "ExtractMessagesJs").value;
+  } else {
+    var keyField = document.getElementById(p + "ApiKey");
+    var keyVal = keyField.value.trim();
+    var hasKey = keyField.dataset.hasKey === "1";
+    var apiKey = ((keyVal === CUSTOM_MASK && hasKey) || (keyVal === "" && hasKey)) ? CUSTOM_KEEP : keyVal;
+    var timeout = parseInt(document.getElementById(p + "Timeout").value, 10);
+    cfg.endpoint = document.getElementById(p + "Endpoint").value.trim();
+    cfg.protocol = document.getElementById(p + "Protocol").value;
+    cfg.model = document.getElementById(p + "Model").value.trim();
+    cfg.api_key = apiKey;
+    cfg.system_prompt = document.getElementById(p + "SystemPrompt").value;
+    cfg.timeout = (timeout >= 5 && timeout <= 300) ? timeout : 30;
+  }
+  return cfg;
+}
+
+function toggleCustomMode(slot) {
+  var p = _customPrefix(slot);
+  var mode = document.getElementById(p + "Mode").value;
+  var apiCfg = document.getElementById(p + "ApiConfig");
+  var webCfg = document.getElementById(p + "WebConfig");
+  var apiActions = document.getElementById(p + "ApiActions");
+  var webActions = document.getElementById(p + "WebActions");
+  if (mode === "web") {
+    apiCfg.classList.add("hidden");
+    webCfg.classList.remove("hidden");
+    apiActions.classList.add("hidden");
+    webActions.classList.remove("hidden");
+  } else {
+    apiCfg.classList.remove("hidden");
+    webCfg.classList.add("hidden");
+    apiActions.classList.remove("hidden");
+    webActions.classList.add("hidden");
+  }
 }
 
 function _customApply(slot, cfg) {
   var p = _customPrefix(slot);
   cfg = cfg || {};
-  document.getElementById(p + "Endpoint").value = cfg.endpoint || "";
-  document.getElementById(p + "Protocol").value = cfg.protocol || "openai";
-  document.getElementById(p + "Model").value = cfg.model || "";
-  var keyField = document.getElementById(p + "ApiKey");
-  keyField.value = cfg.has_api_key ? CUSTOM_MASK : "";
-  keyField.dataset.hasKey = cfg.has_api_key ? "1" : "0";
-  document.getElementById(p + "SystemPrompt").value = cfg.system_prompt || "";
-  document.getElementById(p + "Timeout").value = cfg.timeout || 30;
+  var mode = cfg.mode || "api";
+  document.getElementById(p + "Mode").value = mode;
+  toggleCustomMode(slot);
+  if (mode === "web") {
+    document.getElementById(p + "Url").value = cfg.url || "";
+    document.getElementById(p + "ChatListSelector").value = cfg.chat_list_selector || "";
+    document.getElementById(p + "TitleSelector").value = cfg.title_selector || "";
+    document.getElementById(p + "MessageSelector").value = cfg.message_selector || "";
+    document.getElementById(p + "UserMessageSelector").value = cfg.user_message_selector || "";
+    document.getElementById(p + "AssistantMessageSelector").value = cfg.assistant_message_selector || "";
+    document.getElementById(p + "ScrollContainerSelector").value = cfg.scroll_container_selector || "";
+    document.getElementById(p + "WaitAfterClickMs").value = cfg.wait_after_click_ms || 2000;
+    document.getElementById(p + "ListChatsJs").value = cfg.list_chats_js || "";
+    document.getElementById(p + "ExtractMessagesJs").value = cfg.extract_messages_js || "";
+  } else {
+    document.getElementById(p + "Endpoint").value = cfg.endpoint || "";
+    document.getElementById(p + "Protocol").value = cfg.protocol || "openai";
+    document.getElementById(p + "Model").value = cfg.model || "";
+    var keyField = document.getElementById(p + "ApiKey");
+    keyField.value = cfg.has_api_key ? CUSTOM_MASK : "";
+    keyField.dataset.hasKey = cfg.has_api_key ? "1" : "0";
+    document.getElementById(p + "SystemPrompt").value = cfg.system_prompt || "";
+    document.getElementById(p + "Timeout").value = cfg.timeout || 30;
+  }
   _customRefreshBadge(slot, cfg);
 }
 
 function _customRefreshBadge(slot, cfg) {
   var badge = document.getElementById(_customPrefix(slot) + "Badge");
-  var ready = cfg && cfg.endpoint && cfg.model;
+  var mode = (cfg && cfg.mode) || "api";
+  var ready = false;
+  if (mode === "web") {
+    ready = cfg && cfg.url;
+  } else {
+    ready = cfg && cfg.endpoint && cfg.model;
+  }
   badge.textContent = ready ? "готов" : "не настроен";
   badge.className = ready ? "badge ok" : "badge";
 }
@@ -492,6 +547,90 @@ function generateCustom(slot) {
     log("custom" + slot + ": " + err);
     btn.disabled = false;
     btn.textContent = "Generate & Save";
+  });
+}
+
+function connectCustomWeb(slot) {
+  if (!window.pywebview) return;
+  var p = _customPrefix(slot);
+  var url = document.getElementById(p + "Url").value.trim();
+  if (!url) {
+    log("custom" + slot + ": укажите URL сервиса");
+    return;
+  }
+  saveCustom(slot).then(function() {
+    log("custom" + slot + ": подключение к " + url + "...");
+    return window.pywebview.api.connect_custom_web(slot, url);
+  }).then(function() {
+    log("custom" + slot + ": подключено");
+  }, function(err) {
+    log("custom" + slot + ": ошибка подключения: " + err);
+  });
+}
+
+function disconnectCustomWeb(slot) {
+  if (!window.pywebview) return;
+  window.pywebview.api.disconnect_custom_web(slot).then(function() {
+    log("custom" + slot + ": отключено");
+  }, function(err) {
+    log("custom" + slot + ": ошибка отключения: " + err);
+  });
+}
+
+function scanCustomWeb(slot) {
+  if (!window.pywebview) return;
+  var p = _customPrefix(slot);
+  var chatListEl = document.getElementById(p + "ChatList");
+  chatListEl.classList.remove("hidden");
+  chatListEl.textContent = "сканирование...";
+  window.pywebview.api.scan_custom_web(slot).then(function(chats) {
+    chatListEl.innerHTML = "";
+    if (!chats || chats.length === 0) {
+      chatListEl.textContent = "чаты не найдены";
+      return;
+    }
+    chats.forEach(function(chat) {
+      var div = document.createElement("div");
+      div.className = "chat-item";
+      div.textContent = chat.title || chat.id;
+      div.dataset.url = chat.url || "";
+      div.dataset.index = chat._index;
+      div.onclick = function() {
+        div.classList.toggle("selected");
+      };
+      chatListEl.appendChild(div);
+    });
+    var btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = "Экспорт выбранных";
+    btn.onclick = function() { exportCustomWebSelected(slot); };
+    chatListEl.appendChild(btn);
+  }, function(err) {
+    chatListEl.textContent = "ошибка: " + err;
+  });
+}
+
+function exportCustomWebSelected(slot) {
+  if (!window.pywebview) return;
+  var p = _customPrefix(slot);
+  var items = document.querySelectorAll("#" + p + "ChatList .chat-item.selected");
+  var chats = [];
+  items.forEach(function(el) {
+    var url = el.dataset.url || "";
+    var idx = el.dataset.index;
+    var obj = { url: url };
+    if (idx !== undefined && idx !== "") obj._index = parseInt(idx, 10);
+    chats.push(obj);
+  });
+  if (chats.length === 0) {
+    log("custom" + slot + ": выберите чаты для экспорта");
+    return;
+  }
+  log("custom" + slot + ": экспорт " + chats.length + " чатов...");
+  window.pywebview.api.export_custom_web(slot, JSON.stringify(chats)).then(function() {
+    log("custom" + slot + ": экспорт запущен");
+  }, function(err) {
+    log("custom" + slot + ": ошибка экспорта: " + err);
   });
 }
 

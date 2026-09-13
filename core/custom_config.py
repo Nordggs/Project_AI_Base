@@ -16,6 +16,18 @@ DEFAULT_SLOT = {
     "protocol": "openai",  # openai | anthropic
     "system_prompt": "",
     "timeout": 30,
+    # ── Web mode fields ──
+    "mode": "api",  # api | web
+    "url": "",
+    "chat_list_selector": "",
+    "title_selector": "",
+    "message_selector": "",
+    "user_message_selector": "",
+    "assistant_message_selector": "",
+    "scroll_container_selector": "",
+    "wait_after_click_ms": 2000,
+    "list_chats_js": "",
+    "extract_messages_js": "",
 }
 
 SLOTS = (1, 2)

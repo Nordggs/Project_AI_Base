@@ -279,14 +279,24 @@
         <button id="btnSyncSelected" class="primary" disabled onclick="syncSelected()">Синхронизировать выбранный чат</button>
       </div>
 
-      <!-- CUSTOM 1 (API: generate & save) -->
+      <!-- CUSTOM 1 -->
       <div class="card custom">
         <div class="card-header">
           <h2>Custom 1</h2>
           <span class="badge" id="c1Badge">не настроен</span>
         </div>
 
-        <div class="custom-config">
+        <div class="custom-mode-toggle">
+          <label class="cfg">Режим
+            <select id="c1Mode" onchange="toggleCustomMode(1)">
+              <option value="api">API (generate)</option>
+              <option value="web">Web (browser export)</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- API fields -->
+        <div id="c1ApiConfig" class="custom-config">
           <label class="cfg">Endpoint
             <input id="c1Endpoint" placeholder="https://api.perplexity.ai/chat/completions" />
           </label>
@@ -310,28 +320,82 @@
           </label>
         </div>
 
+        <!-- Web fields -->
+        <div id="c1WebConfig" class="custom-config hidden">
+          <label class="cfg">URL сервиса
+            <input id="c1Url" placeholder="https://chat.mistral.ai" />
+          </label>
+          <label class="cfg">Chat list selector
+            <input id="c1ChatListSelector" placeholder="nav a[href*='/chat/']" />
+          </label>
+          <label class="cfg">Title selector (optional)
+            <input id="c1TitleSelector" placeholder=".chat-title" />
+          </label>
+          <label class="cfg">Message selector
+            <input id="c1MessageSelector" placeholder=".message-content" />
+          </label>
+          <label class="cfg">User message selector
+            <input id="c1UserMessageSelector" placeholder=".user-message" />
+          </label>
+          <label class="cfg">Assistant message selector
+            <input id="c1AssistantMessageSelector" placeholder=".assistant-message" />
+          </label>
+          <label class="cfg">Scroll container selector
+            <input id="c1ScrollContainerSelector" placeholder="nav" />
+          </label>
+          <label class="cfg">Wait after click (ms)
+            <input id="c1WaitAfterClickMs" type="number" value="2000" min="0" max="10000" />
+          </label>
+          <label class="cfg">List chats JS (optional, overrides selectors)
+            <textarea id="c1ListChatsJs" rows="3" placeholder="() => { return [...document.querySelectorAll('nav a')].map(...) }"></textarea>
+          </label>
+          <label class="cfg">Extract messages JS (optional, overrides selectors)
+            <textarea id="c1ExtractMessagesJs" rows="3" placeholder="() => { return [...document.querySelectorAll('.msg')].map(...) }"></textarea>
+          </label>
+        </div>
+
         <div class="custom-actions">
           <button class="small" onclick="saveCustom(1)">Сохранить</button>
           <button class="small" onclick="testCustom(1)">Test</button>
         </div>
         <div id="c1TestResult" class="custom-test hidden"></div>
 
-        <label class="cfg">Prompt
-          <textarea id="c1Prompt" placeholder="Ваш промпт для модели..."></textarea>
-        </label>
+        <!-- Web actions -->
+        <div id="c1WebActions" class="custom-actions hidden">
+          <button class="small" onclick="connectCustomWeb(1)">Подключить</button>
+          <button class="small" onclick="disconnectCustomWeb(1)">Отключить</button>
+          <button class="small" onclick="scanCustomWeb(1)">Сканировать</button>
+        </div>
+        <div id="c1ChatList" class="custom-chat-list hidden"></div>
 
-        <button id="btnCustom1Gen" class="primary" onclick="generateCustom(1)">Generate &amp; Save</button>
-        <button id="btnStopC1" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+        <!-- API actions -->
+        <div id="c1ApiActions">
+          <label class="cfg">Prompt
+            <textarea id="c1Prompt" placeholder="Ваш промпт для модели..."></textarea>
+          </label>
+          <button id="btnCustom1Gen" class="primary" onclick="generateCustom(1)">Generate &amp; Save</button>
+          <button id="btnStopC1" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+        </div>
       </div>
 
-      <!-- CUSTOM 2 (API: generate & save) -->
+      <!-- CUSTOM 2 -->
       <div class="card custom">
         <div class="card-header">
           <h2>Custom 2</h2>
           <span class="badge" id="c2Badge">не настроен</span>
         </div>
 
-        <div class="custom-config">
+        <div class="custom-mode-toggle">
+          <label class="cfg">Режим
+            <select id="c2Mode" onchange="toggleCustomMode(2)">
+              <option value="api">API (generate)</option>
+              <option value="web">Web (browser export)</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- API fields -->
+        <div id="c2ApiConfig" class="custom-config">
           <label class="cfg">Endpoint
             <input id="c2Endpoint" placeholder="https://api.anthropic.com/v1/messages" />
           </label>
@@ -355,18 +419,62 @@
           </label>
         </div>
 
+        <!-- Web fields -->
+        <div id="c2WebConfig" class="custom-config hidden">
+          <label class="cfg">URL сервиса
+            <input id="c2Url" placeholder="https://grok.x.ai" />
+          </label>
+          <label class="cfg">Chat list selector
+            <input id="c2ChatListSelector" placeholder="nav a[href*='/chat/']" />
+          </label>
+          <label class="cfg">Title selector (optional)
+            <input id="c2TitleSelector" placeholder=".chat-title" />
+          </label>
+          <label class="cfg">Message selector
+            <input id="c2MessageSelector" placeholder=".message-content" />
+          </label>
+          <label class="cfg">User message selector
+            <input id="c2UserMessageSelector" placeholder=".user-message" />
+          </label>
+          <label class="cfg">Assistant message selector
+            <input id="c2AssistantMessageSelector" placeholder=".assistant-message" />
+          </label>
+          <label class="cfg">Scroll container selector
+            <input id="c2ScrollContainerSelector" placeholder="nav" />
+          </label>
+          <label class="cfg">Wait after click (ms)
+            <input id="c2WaitAfterClickMs" type="number" value="2000" min="0" max="10000" />
+          </label>
+          <label class="cfg">List chats JS (optional, overrides selectors)
+            <textarea id="c2ListChatsJs" rows="3" placeholder="() => { return [...document.querySelectorAll('nav a')].map(...) }"></textarea>
+          </label>
+          <label class="cfg">Extract messages JS (optional, overrides selectors)
+            <textarea id="c2ExtractMessagesJs" rows="3" placeholder="() => { return [...document.querySelectorAll('.msg')].map(...) }"></textarea>
+          </label>
+        </div>
+
         <div class="custom-actions">
           <button class="small" onclick="saveCustom(2)">Сохранить</button>
           <button class="small" onclick="testCustom(2)">Test</button>
         </div>
         <div id="c2TestResult" class="custom-test hidden"></div>
 
-        <label class="cfg">Prompt
-          <textarea id="c2Prompt" placeholder="Ваш промпт для модели..."></textarea>
-        </label>
+        <!-- Web actions -->
+        <div id="c2WebActions" class="custom-actions hidden">
+          <button class="small" onclick="connectCustomWeb(2)">Подключить</button>
+          <button class="small" onclick="disconnectCustomWeb(2)">Отключить</button>
+          <button class="small" onclick="scanCustomWeb(2)">Сканировать</button>
+        </div>
+        <div id="c2ChatList" class="custom-chat-list hidden"></div>
 
-        <button id="btnCustom2Gen" class="primary" onclick="generateCustom(2)">Generate &amp; Save</button>
-        <button id="btnStopC2" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+        <!-- API actions -->
+        <div id="c2ApiActions">
+          <label class="cfg">Prompt
+            <textarea id="c2Prompt" placeholder="Ваш промпт для модели..."></textarea>
+          </label>
+          <button id="btnCustom2Gen" class="primary" onclick="generateCustom(2)">Generate &amp; Save</button>
+          <button id="btnStopC2" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+        </div>
       </div>
 
     </div>
