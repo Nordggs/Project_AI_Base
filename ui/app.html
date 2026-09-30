@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Chat Exporter</title>
+  <link rel="stylesheet" href="app.css" />
+  <link rel="icon" href="icon.png" />
+</head>
+<body>
+
+  <!-- SPLASH SCREEN -->
+  <div id="splash">
+    <img src="splash.png" alt="AI Chat Exporter" />
+  </div>
+
+  <!-- MODAL (hidden by default) -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-content">
+      <h3 id="modalTitle">Подключить аккаунт</h3>
+      <label id="modalLabel" for="accountUrl">URL сервиса:</label>
+      <input id="accountUrl" placeholder="https://chat.deepseek.com/" />
+      <div id="modalError" class="hidden" style="color:#f55;font-size:12px;margin-bottom:8px;"></div>
+      <div class="modal-actions">
+        <button class="primary" onclick="submitAccount()">Подключить</button>
+        <button class="cancel" onclick="closeModal()">Отмена</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ABOUT MODAL -->
+  <div id="aboutModal" class="modal hidden">
+    <div class="modal-content about-content">
+      <h3>AI Chat Exporter</h3>
+      <div class="about-version" id="aboutVersion">v0.6.0</div>
+      <p>Экспорт диалогов из ChatGPT, Gemini, Claude, Qwen и DeepSeek в Markdown.</p>
+      <h4>Как начать работу</h4>
+      <ol>
+        <li>Выберите папку для экспорта: кнопка «Изменить…» в верхней панели.</li>
+        <li>Нажмите «Запустить Chrome» — обязательный первый шаг. Через это окно Chrome подключаются все сервисы.</li>
+        <li>Нажмите Connect у нужного сервиса и войдите в свой аккаунт.</li>
+        <li>Нажмите Export у сервиса или «Синхронизировать всё».</li>
+        <li>Проверьте результат: готовые Markdown-файлы появятся в выбранной папке.</li>
+      </ol>
+      <h4>Custom 1 / 2 — экспорт через preset (без знания CSS)</h4>
+      <ol>
+        <li>Откройте вкладку Custom 1/2, выберите <b>Web Browser Export</b>.</li>
+        <li>Выберите <b>Preset</b> и нажмите <b>Apply preset</b>.</li>
+        <li>Укажите <b>URL</b> чата (можно менять и после Apply).</li>
+        <li>Нажмите <b>Test</b> — проверка покажет счётчики и вердикт.</li>
+        <li><b>Подключить → Сканировать → Экспорт выбранных</b>.</li>
+      </ol>
+      <p>Не подошёл ни один preset — заполните селекторы вручную в блоке <i>Advanced / Manual configuration</i> (для продвинутых).</p>
+      <p>Автоперебор presets (Auto Trial) пока отложен: presets проверяются по одному кнопкой <b>Test</b>.</p>
+      <p><b>Важно:</b> если Chrome/CDP не запущен, синхронизация не сработает — сначала нажмите «Запустить Chrome». Если Connect не сработал сразу, подождите пару секунд и нажмите ещё раз.</p>
+      <h4>Папка экспорта</h4>
+      <p>Путь показан в верхней части приложения. «Изменить…» выбирает другую папку, «Открыть» открывает её в Проводнике.</p>
+      <div class="about-links">
+        <a href="#" onclick="openExternal('https://github.com/Nordggs/Project_AI_Base'); return false;">GitHub</a> ·
+        <a href="#" onclick="openExternal('https://github.com/Nordggs/Project_AI_Base/releases'); return false;">Releases</a> ·
+        <a href="#" onclick="openExternal('https://github.com/Nordggs/Project_AI_Base/blob/master/LICENSE'); return false;">License</a>
+      </div>
+      <div class="modal-actions">
+        <button class="cancel" onclick="closeAbout()">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- UPDATE MODAL -->
+  <div id="updateModal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Доступна новая версия</h3>
+      <p>
+        Текущая: <span id="updCurrent"></span><br />
+        Новая: <span id="updLatest"></span>
+      </p>
+      <p>Исправления и улучшения доступны на GitHub.</p>
+      <div class="modal-actions">
+        <button class="primary" onclick="openUpdateRelease()">Открыть страницу релиза</button>
+        <button class="cancel" onclick="closeUpdate()">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app">
+
+    <!-- TOP BAR -->
+    <div class="topbar">
+      <div class="title">
+        AI Chat Exporter
+        <span class="subtitle">LOCAL MARKDOWN EXPORTER</span>
+      </div>
+
+      <!-- CDP BAR (global infrastructure status, moved up from below) -->
+      <div id="cdpBar" class="cdp-bar">
+        <span class="cdp-label" id="cdpIndicator">🔗 CDP: <span class="status-dot dot-off">○</span> не запущен</span>
+        <button id="btnStartCdp" class="small" onclick="startCdp()">▶ Запустить Chrome</button>
+        <button id="btnStopCdp" class="small danger hidden" onclick="stopCdp()">⏹ Остановить</button>
+        <button id="btnRestartCdp" class="small hidden" onclick="restartCdp()">⟳ Перезапустить</button>
+        <span class="cdp-providers">
+          <span class="pv-item"><span id="pvGemini" class="pv-dot dot-off">○</span> Gemini</span>
+          <span class="pv-item"><span id="pvQwen" class="pv-dot dot-off">○</span> Qwen</span>
+          <span class="pv-item"><span id="pvChatGPT" class="pv-dot dot-off">○</span> ChatGPT</span>
+          <span class="pv-item"><span id="pvClaude" class="pv-dot dot-off">○</span> Claude</span>
+          <span class="pv-item"><span id="pvDeepSeek" class="pv-dot dot-off">○</span> DeepSeek</span>
+          <span class="pv-item"><span id="pvCustom1" class="pv-dot dot-off">○</span> Custom 1</span>
+          <span class="pv-item"><span id="pvCustom2" class="pv-dot dot-off">○</span> Custom 2</span>
+        </span>
+      </div>
+      <button class="icon-btn" onclick="openAbout()" title="О программе">?</button>
+    </div>
+
+    <!-- OUTPUT DIRECTORY (global export destination) -->
+    <div class="output-bar">
+      <span class="output-label">Папка экспорта:</span>
+      <span class="output-path" id="outputDirPath" title=""></span>
+      <button class="small" onclick="chooseOutputDir()">Изменить…</button>
+      <button class="small" onclick="openOutputDir()">Открыть</button>
+    </div>
+
+    <!-- SYNC ALL (moved here from the top bar) -->
+    <div class="sync-bar">
+      <button class="sync-all" onclick="syncAll()">
+        Синхронизировать всё
+      </button>
+    </div>
+
+    <!-- PROVIDERS (TABS) -->
+    <div class="tabs-bar">
+      <button class="tab active" data-provider="deepseek" onclick="switchTab('deepseek')">DeepSeek</button>
+      <button class="tab" data-provider="gemini" onclick="switchTab('gemini')">Gemini</button>
+      <button class="tab" data-provider="qwen" onclick="switchTab('qwen')">Qwen</button>
+      <button class="tab" data-provider="chatgpt" onclick="switchTab('chatgpt')">ChatGPT</button>
+      <button class="tab" data-provider="claude" onclick="switchTab('claude')">Claude</button>
+      <button class="tab" data-provider="custom1" onclick="switchTab('custom1')">Custom 1</button>
+      <button class="tab" data-provider="custom2" onclick="switchTab('custom2')">Custom 2</button>
+    </div>
+
+    <div class="tab-panels">
+
+      <!-- CHATGPT -->
+      <div class="tab-panel" data-panel="chatgpt">
+      <div class="card chatgpt">
+        <div class="card-header">
+          <h2>ChatGPT</h2>
+          <span class="badge">Нет аккаунтов</span>
+          <button class="small" onclick="addChatGPTAccount()">+ аккаунт</button>
+        </div>
+
+        <div class="empty" id="cgEmpty">
+          Подключите аккаунт ChatGPT для авторизации.
+        </div>
+
+        <!-- Account info (hidden until connected) -->
+        <div id="cgAccount" class="account hidden">
+          <div class="name">ChatGPT</div>
+          <div class="status ok">подключен</div>
+          <div class="actions">
+            <button onclick="reconnectChatGPT()">переподключить</button>
+          </div>
+        </div>
+
+        <button id="btnChatGPTSyncAll" class="primary" disabled onclick="syncChatGPTAll()">Синхронизировать ChatGPT</button>
+        <button id="btnStopCG" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+
+        <!-- URL list (hidden until connected) -->
+        <div id="chatgptUrls" class="url-area hidden">
+          <label for="cgUrls">URL чатов (по одному на строке):</label>
+          <textarea id="cgUrls" placeholder="https://chatgpt.com/c/..."></textarea>
+        </div>
+
+        <button id="btnChatGPTSyncSelected" class="primary" disabled onclick="syncChatGPTSelected()">Синхронизировать выбранный чат</button>
+      </div>
+      </div><!-- /chatgpt panel -->
+
+      <!-- GEMINI -->
+      <div class="tab-panel" data-panel="gemini">
+      <div class="card gemini">
+        <div class="card-header">
+          <h2>Gemini</h2>
+          <span class="badge">Нет аккаунтов</span>
+          <button class="small" onclick="addGeminiAccount()">+ аккаунт</button>
+        </div>
+
+        <div class="empty" id="gmEmpty">
+          Добавьте профиль аккаунта для авторизации.
+        </div>
+
+        <!-- Account info (hidden until connected) -->
+        <div id="gmAccount" class="account hidden">
+          <div class="name">Google Gemini</div>
+          <div class="status ok">подключен</div>
+          <div class="actions">
+            <button onclick="reconnectGemini()">переподключить</button>
+          </div>
+        </div>
+
+        <button id="btnGeminiSyncAll" class="primary" disabled onclick="syncGeminiAll()">Синхронизировать Gemini</button>
+        <button id="btnStopGM" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+
+        <!-- URL list (hidden until connected) -->
+        <div id="geminiUrls" class="url-area hidden">
+          <label for="gmUrls">URL чатов (по одному на строке):</label>
+          <textarea id="gmUrls" placeholder="https://gemini.google.com/app/..."></textarea>
+        </div>
+
+        <button id="btnGeminiSyncSelected" class="primary" disabled onclick="syncGeminiSelected()">Синхронизировать выбранный чат</button>
+      </div>
+      </div><!-- /gemini panel -->
+
+      <!-- CLAUDE -->
+      <div class="tab-panel" data-panel="claude">
+      <div class="card claude">
+        <div class="card-header">
+          <h2>Claude</h2>
+          <span class="badge">Нет аккаунтов</span>
+          <button class="small" onclick="addClaudeAccount()">+ аккаунт</button>
+        </div>
+
+        <div class="empty" id="clEmpty">
+          Подключите аккаунт Claude для авторизации.
+        </div>
+
+        <!-- Account info (hidden until connected) -->
+        <div id="clAccount" class="account hidden">
+          <div class="name">Claude</div>
+          <div class="status ok">подключен</div>
+          <div class="actions">
+            <button onclick="reconnectClaude()">переподключить</button>
+          </div>
+        </div>
+
+        <button id="btnClaudeSyncAll" class="primary" disabled onclick="syncClaudeAll()">Синхронизировать Claude</button>
+        <button id="btnStopCL" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+
+        <!-- URL list (hidden until connected) -->
+        <div id="claudeUrls" class="url-area hidden">
+          <label for="clUrls">URL чатов (по одному на строке):</label>
+          <textarea id="clUrls" placeholder="https://claude.ai/chat/..."></textarea>
+        </div>
+
+        <button id="btnClaudeSyncSelected" class="primary" disabled onclick="syncClaudeSelected()">Синхронизировать выбранный чат</button>
+      </div>
+      </div><!-- /claude panel -->
+
+      <!-- QWEN -->
+      <div class="tab-panel" data-panel="qwen">
+      <div class="card qwen">
+        <div class="card-header">
+          <h2>Qwen</h2>
+          <span class="badge">Нет аккаунтов</span>
+          <button class="small" onclick="addQwenAccount()">+ аккаунт</button>
+        </div>
+
+        <div class="empty" id="qwEmpty">
+          Подключите аккаунт Qwen для авторизации.
+        </div>
+
+        <!-- Account info (hidden until connected) -->
+        <div id="qwAccount" class="account hidden">
+          <div class="name">Qwen Chat</div>
+          <div class="status ok">подключен</div>
+          <div class="actions">
+            <button onclick="reconnectQwen()">переподключить</button>
+          </div>
+        </div>
+
+        <button id="btnQwenSyncAll" class="primary" disabled onclick="syncQwenAll()">Синхронизировать Qwen</button>
+        <button id="btnStopQW" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+
+        <!-- URL list (hidden until connected) -->
+        <div id="qwenUrls" class="url-area hidden">
+          <label for="qwUrls">URL чатов (по одному на строке):</label>
+          <textarea id="qwUrls" placeholder="https://chat.qwen.ai/c/..."></textarea>
+        </div>
+
+        <button id="btnQwenSyncSelected" class="primary" disabled onclick="syncQwenSelected()">Синхронизировать выбранный чат</button>
+      </div>
+      </div><!-- /qwen panel -->
+
+      <!-- DEEPSEEK -->
+      <div class="tab-panel active" data-panel="deepseek">
+      <div class="card disabled deepseek">
+        <div class="card-header">
+          <h2>DeepSeek</h2>
+          <span class="badge">Нет аккаунтов</span>
+          <button class="small" onclick="addDeepSeekAccount()">+ аккаунт</button>
+        </div>
+
+        <div class="empty" id="dsEmpty">
+          Добавьте профиль аккаунта для авторизации.
+        </div>
+
+        <!-- Account info (hidden until connected) -->
+        <div id="dsAccount" class="account hidden">
+          <div class="name">DeepSeek Chat</div>
+          <div class="status ok">подключен</div>
+          <div class="actions">
+            <button onclick="reconnect()">переподключить</button>
+          </div>
+        </div>
+
+        <button id="btnSyncAll" class="primary" disabled onclick="syncAllDeepSeek()">Синхронизировать DeepSeek</button>
+        <button id="btnStopDS" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+
+        <!-- URL list (hidden until connected) -->
+        <div id="deepseekUrls" class="url-area hidden">
+          <label for="dsUrls">URL чатов (по одному на строке):</label>
+          <textarea id="dsUrls" placeholder="https://chat.deepseek.com/a/chat/s/..."></textarea>
+        </div>
+
+        <button id="btnSyncSelected" class="primary" disabled onclick="syncSelected()">Синхронизировать выбранный чат</button>
+      </div>
+      </div><!-- /deepseek panel -->
+
+      <!-- CUSTOM 1 -->
+      <div class="tab-panel" data-panel="custom1">
+      <div class="card custom">
+        <div class="card-header">
+          <h2>Custom 1</h2>
+          <span class="badge" id="c1Badge">не настроен</span>
+        </div>
+
+        <div class="custom-mode-toggle">
+          <label class="cfg">Режим
+            <select id="c1Mode" onchange="toggleCustomMode(1)">
+              <option value="api">API (generate)</option>
+              <option value="web">Web (browser export)</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- API fields -->
+        <div id="c1ApiConfig" class="custom-config">
+          <label class="cfg">Endpoint
+            <input id="c1Endpoint" placeholder="https://api.perplexity.ai/chat/completions" />
+          </label>
+          <label class="cfg">Protocol
+            <select id="c1Protocol">
+              <option value="openai">OpenAI Chat Completions</option>
+              <option value="anthropic">Anthropic Messages</option>
+            </select>
+          </label>
+          <label class="cfg">Model
+            <input id="c1Model" placeholder="sonar-pro" />
+          </label>
+          <label class="cfg">API Key
+            <input id="c1ApiKey" type="password" placeholder="sk-..." />
+          </label>
+          <label class="cfg">System Prompt
+            <input id="c1SystemPrompt" placeholder="необязательно" />
+          </label>
+          <label class="cfg">Timeout (сек)
+            <input id="c1Timeout" type="number" value="30" min="5" max="300" />
+          </label>
+        </div>
+
+        <!-- Web fields -->
+        <div id="c1WebConfig" class="custom-config hidden">
+          <label class="cfg">Preset
+            <select id="c1PresetSelect"><option value="">Выберите preset</option></select>
+          </label>
+          <div class="custom-actions">
+            <button class="small" onclick="applyCustomPreset(1)">Применить preset</button>
+          </div>
+          <div id="c1PresetHint" class="custom-hint hidden"></div>
+          <div class="custom-advanced">--- Advanced / Manual configuration (ручная настройка для продвинутых — обычному пользователю не нужна) ---</div>
+          <label class="cfg">URL сервиса
+            <input id="c1Url" placeholder="https://chat.mistral.ai" />
+          </label>
+          <label class="cfg">Chat list selector
+            <input id="c1ChatListSelector" placeholder="nav a[href*='/chat/']" />
+          </label>
+          <label class="cfg">Title selector (optional)
+            <input id="c1TitleSelector" placeholder=".chat-title" />
+          </label>
+          <label class="cfg">Message selector
+            <input id="c1MessageSelector" placeholder=".message-content" />
+          </label>
+          <label class="cfg">User message selector
+            <input id="c1UserMessageSelector" placeholder=".user-message" />
+          </label>
+          <label class="cfg">Assistant message selector
+            <input id="c1AssistantMessageSelector" placeholder=".assistant-message" />
+          </label>
+          <label class="cfg">Scroll container selector
+            <input id="c1ScrollContainerSelector" placeholder="nav" />
+          </label>
+          <label class="cfg">Wait after click (ms)
+            <input id="c1WaitAfterClickMs" type="number" value="2000" min="0" max="10000" />
+          </label>
+          <label class="cfg">List chats JS (optional, overrides selectors)
+            <textarea id="c1ListChatsJs" rows="3" placeholder="() => { return [...document.querySelectorAll('nav a')].map(...) }"></textarea>
+          </label>
+          <label class="cfg">Extract messages JS (optional, overrides selectors)
+            <textarea id="c1ExtractMessagesJs" rows="3" placeholder="() => { return [...document.querySelectorAll('.msg')].map(...) }"></textarea>
+          </label>
+        </div>
+
+        <div class="custom-actions">
+          <button class="small" onclick="saveCustom(1)"><span class="step">1</span>Сохранить</button>
+          <button class="small" onclick="testCustom(1)"><span class="step">3</span>Test</button>
+        </div>
+        <div id="c1TestResult" class="custom-test hidden"></div>
+
+        <!-- Web actions -->
+        <div id="c1WebActions" class="custom-actions hidden">
+          <button class="small" onclick="connectCustomWeb(1)"><span class="step">2</span>Подключить</button>
+          <button class="small" onclick="scanCustomWeb(1)"><span class="step">4</span>Сканировать</button>
+          <button class="small" onclick="disconnectCustomWeb(1)"><span class="step">5</span>Отключить</button>
+        </div>
+        <div id="c1ChatList" class="custom-chat-list hidden"></div>
+
+        <!-- API actions -->
+        <div id="c1ApiActions">
+          <label class="cfg">Prompt
+            <textarea id="c1Prompt" placeholder="Ваш промпт для модели..."></textarea>
+          </label>
+          <button id="btnCustom1Gen" class="primary" onclick="generateCustom(1)">Generate &amp; Save</button>
+          <button id="btnStopC1" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+        </div>
+      </div>
+      </div><!-- /custom1 panel -->
+
+      <!-- CUSTOM 2 -->
+      <div class="tab-panel" data-panel="custom2">
+      <div class="card custom">
+        <div class="card-header">
+          <h2>Custom 2</h2>
+          <span class="badge" id="c2Badge">не настроен</span>
+        </div>
+
+        <div class="custom-mode-toggle">
+          <label class="cfg">Режим
+            <select id="c2Mode" onchange="toggleCustomMode(2)">
+              <option value="api">API (generate)</option>
+              <option value="web">Web (browser export)</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- API fields -->
+        <div id="c2ApiConfig" class="custom-config">
+          <label class="cfg">Endpoint
+            <input id="c2Endpoint" placeholder="https://api.anthropic.com/v1/messages" />
+          </label>
+          <label class="cfg">Protocol
+            <select id="c2Protocol">
+              <option value="openai">OpenAI Chat Completions</option>
+              <option value="anthropic">Anthropic Messages</option>
+            </select>
+          </label>
+          <label class="cfg">Model
+            <input id="c2Model" placeholder="claude-sonnet-4-5" />
+          </label>
+          <label class="cfg">API Key
+            <input id="c2ApiKey" type="password" placeholder="sk-ant-..." />
+          </label>
+          <label class="cfg">System Prompt
+            <input id="c2SystemPrompt" placeholder="необязательно" />
+          </label>
+          <label class="cfg">Timeout (сек)
+            <input id="c2Timeout" type="number" value="30" min="5" max="300" />
+          </label>
+        </div>
+
+        <!-- Web fields -->
+        <div id="c2WebConfig" class="custom-config hidden">
+          <label class="cfg">Preset
+            <select id="c2PresetSelect"><option value="">Выберите preset</option></select>
+          </label>
+          <div class="custom-actions">
+            <button class="small" onclick="applyCustomPreset(2)">Применить preset</button>
+          </div>
+          <div id="c2PresetHint" class="custom-hint hidden"></div>
+          <div class="custom-advanced">--- Advanced / Manual configuration (ручная настройка для продвинутых — обычному пользователю не нужна) ---</div>
+          <label class="cfg">URL сервиса
+            <input id="c2Url" placeholder="https://grok.x.ai" />
+          </label>
+          <label class="cfg">Chat list selector
+            <input id="c2ChatListSelector" placeholder="nav a[href*='/chat/']" />
+          </label>
+          <label class="cfg">Title selector (optional)
+            <input id="c2TitleSelector" placeholder=".chat-title" />
+          </label>
+          <label class="cfg">Message selector
+            <input id="c2MessageSelector" placeholder=".message-content" />
+          </label>
+          <label class="cfg">User message selector
+            <input id="c2UserMessageSelector" placeholder=".user-message" />
+          </label>
+          <label class="cfg">Assistant message selector
+            <input id="c2AssistantMessageSelector" placeholder=".assistant-message" />
+          </label>
+          <label class="cfg">Scroll container selector
+            <input id="c2ScrollContainerSelector" placeholder="nav" />
+          </label>
+          <label class="cfg">Wait after click (ms)
+            <input id="c2WaitAfterClickMs" type="number" value="2000" min="0" max="10000" />
+          </label>
+          <label class="cfg">List chats JS (optional, overrides selectors)
+            <textarea id="c2ListChatsJs" rows="3" placeholder="() => { return [...document.querySelectorAll('nav a')].map(...) }"></textarea>
+          </label>
+          <label class="cfg">Extract messages JS (optional, overrides selectors)
+            <textarea id="c2ExtractMessagesJs" rows="3" placeholder="() => { return [...document.querySelectorAll('.msg')].map(...) }"></textarea>
+          </label>
+        </div>
+
+        <div class="custom-actions">
+          <button class="small" onclick="saveCustom(2)"><span class="step">1</span>Сохранить</button>
+          <button class="small" onclick="testCustom(2)"><span class="step">3</span>Test</button>
+        </div>
+        <div id="c2TestResult" class="custom-test hidden"></div>
+
+        <!-- Web actions -->
+        <div id="c2WebActions" class="custom-actions hidden">
+          <button class="small" onclick="connectCustomWeb(2)"><span class="step">2</span>Подключить</button>
+          <button class="small" onclick="scanCustomWeb(2)"><span class="step">4</span>Сканировать</button>
+          <button class="small" onclick="disconnectCustomWeb(2)"><span class="step">5</span>Отключить</button>
+        </div>
+        <div id="c2ChatList" class="custom-chat-list hidden"></div>
+
+        <!-- API actions -->
+        <div id="c2ApiActions">
+          <label class="cfg">Prompt
+            <textarea id="c2Prompt" placeholder="Ваш промпт для модели..."></textarea>
+          </label>
+          <button id="btnCustom2Gen" class="primary" onclick="generateCustom(2)">Generate &amp; Save</button>
+          <button id="btnStopC2" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+        </div>
+      </div>
+      </div><!-- /custom2 panel -->
+
+    </div><!-- /tab-panels -->
+
+    <!-- JOURNAL -->
+    <div class="journal">
+      <div class="journal-header">
+        <h3>Журнал</h3>
+        <span id="bridgeStatus" class="status">bridge: ready</span>
+      </div>
+
+      <pre id="log"></pre>
+    </div>
+
+    <div class="version">
+      <span id="versionText">v0.6.0</span>
+      <button id="updateBadge" class="update-badge hidden" onclick="showUpdateModal()" title=""></button>
+    </div>
+
+  </div>
+
+  <!-- SIDEBAR TOGGLE TAB -->
+  <div class="side-tab" onclick="toggleSidebar()">☰</div>
+
+  <!-- SIDEBAR OVERLAY -->
+  <div id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <h3>Debug</h3>
+      <button onclick="saveChatLog()">Save Chat Log</button>
+    </div>
+    <pre id="sidebarLog"></pre>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

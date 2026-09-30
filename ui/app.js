@@ -1,0 +1,1335 @@
+let currentProvider = null;
+
+// ── Tab switching ──
+
+var _activeTab = 'deepseek';
+
+function switchTab(provider) {
+  _activeTab = provider;
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+  var tab = document.querySelector('.tab[data-provider="' + provider + '"]');
+  if (tab) tab.classList.add('active');
+  document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
+  var panel = document.querySelector('.tab-panel[data-panel="' + provider + '"]');
+  if (panel) panel.classList.add('active');
+}
+
+var _connectedClasses = [
+  'connected-deepseek', 'connected-gemini', 'connected-qwen',
+  'connected-chatgpt', 'connected-claude',
+  'connected-custom1', 'connected-custom2'
+];
+
+function setTabConnectionState(provider, connected) {
+  var tab = document.querySelector('.tab[data-provider="' + provider + '"]');
+  if (!tab) return;
+  tab.classList.remove.apply(tab.classList, _connectedClasses);
+  if (connected) {
+    tab.classList.add('connected-' + provider);
+  }
+}
+
+function resetAllTabStates() {
+  document.querySelectorAll('.tab').forEach(function(tab) {
+    var before = tab.className;
+    tab.classList.remove.apply(tab.classList, _connectedClasses);
+    tab.classList.remove('syncing', 'sync-failed');
+    if (tab.className !== before) {
+      log('[TABS] reset: ' + (tab.dataset.provider || '?') + ' → idle');
+    }
+  });
+}
+
+function renderLog(msg) {
+  const el1 = document.getElementById("log");
+  const el2 = document.getElementById("sidebarLog");
+  if (el1) { el1.textContent += msg + "\n"; el1.scrollTop = el1.scrollHeight; }
+  if (el2) { el2.textContent += msg + "\n"; el2.scrollTop = el2.scrollHeight; }
+}
+
+function log(msg) {
+  renderLog(`[UI] ${msg}`);
+}
+
+function pushSummary(msg) {
+  renderLog(`─── ${msg} ───`);
+}
+
+function setBridgeStatus(status) {
+  document.getElementById("bridgeStatus").textContent = status;
+  if (status === "ready" || status === "connected") {
+    fadeSplash();
+  }
+}
+
+function fadeSplash() {
+  const s = document.getElementById("splash");
+  if (s && !s.classList.contains("fade-out")) {
+    s.classList.add("fade-out");
+    setTimeout(function() { s.style.display = "none"; }, 600);
+  }
+}
+
+// ── Modal ──
+
+function setConnected() {
+  document.querySelector(".deepseek .badge").textContent = "1 подключено";
+  document.querySelector(".deepseek .badge").className = "badge ok";
+  document.querySelector(".deepseek").classList.remove("disabled");
+  document.getElementById("dsEmpty").style.display = "none";
+  document.getElementById("dsAccount").classList.remove("hidden");
+  document.getElementById("deepseekUrls").classList.remove("hidden");
+  document.getElementById("btnSyncAll").disabled = false;
+  document.getElementById("btnSyncSelected").disabled = false;
+  document.getElementById("pvDeepSeek").className = "pv-dot dot-on";
+  setTabConnectionState('deepseek', true);
+  setBridgeStatus("connected");
+}
+
+function addDeepSeekAccount() {
+  log("connecting DeepSeek...");
+  if (window.pywebview) {
+    window.pywebview.api.connect_deepseek().then(
+      function() {
+        log("DeepSeek connected");
+        setConnected();
+      },
+      function(err) {
+        log("DeepSeek connect failed: " + err);
+      }
+    );
+  }
+}
+
+function addAccount(provider) {
+  currentProvider = provider;
+  document.getElementById("modalTitle").textContent = "Подключить аккаунт";
+  document.getElementById("modalLabel").textContent = "URL DeepSeek:";
+  document.getElementById("accountUrl").value = "https://chat.deepseek.com/";
+  document.getElementById("accountUrl").placeholder = "https://chat.deepseek.com/";
+  document.getElementById("modal").classList.remove("hidden");
+  document.getElementById("modalError").classList.add("hidden");
+}
+
+function closeModal() {
+  document.getElementById("modal").classList.add("hidden");
+  currentProvider = null;
+}
+
+function submitAccount() {
+  const url = document.getElementById("accountUrl").value.trim();
+  if (!url) return;
+
+  document.getElementById("modalError").classList.add("hidden");
+  log(`add account ${currentProvider}: ${url.slice(0, 50)}...`);
+
+  const btn = document.querySelector("#modal .primary");
+  btn.disabled = true;
+  btn.textContent = "Connecting...";
+
+  if (window.pywebview) {
+    window.pywebview.api.add_account(url).then(
+      function(res) {
+        log("account connected");
+        btn.disabled = false;
+        btn.textContent = "Подключить";
+        setConnected();
+        closeModal();
+      },
+      function(err) {
+        log("connection failed: " + err);
+        btn.disabled = false;
+        btn.textContent = "Подключить";
+        document.getElementById("modalError").textContent = "Ошибка: " + err;
+        document.getElementById("modalError").classList.remove("hidden");
+      }
+    );
+  }
+}
+
+// ── Version / Update / About ──
+
+var _lastUpdate = null;
+
+function openExternal(url) {
+  if (window.pywebview && url) {
+    window.pywebview.api.open_external(url);
+  }
+}
+
+function refreshVersion() {
+  if (!window.pywebview) return;
+  window.pywebview.api.get_version().then(function(v) {
+    var el = document.getElementById("versionText");
+    if (el && v) el.textContent = "v" + v.current;
+    var about = document.getElementById("aboutVersion");
+    if (about && v) about.textContent = "v" + v.current;
+  }).catch(function() {});
+}
+
+function checkForUpdate() {
+  if (!window.pywebview) return;
+  window.pywebview.api.check_update().then(function(res) {
+    _lastUpdate = res;
+    if (res && res.available) {
+      var badge = document.getElementById("updateBadge");
+      if (badge) {
+        badge.classList.remove("hidden");
+        badge.title = "Доступна новая версия " + res.latest;
+      }
+    }
+  }).catch(function() {});
+}
+
+function showUpdateModal() {
+  if (!_lastUpdate || !_lastUpdate.available) return;
+  document.getElementById("updCurrent").textContent = "v" + _lastUpdate.current;
+  document.getElementById("updLatest").textContent = _lastUpdate.latest;
+  document.getElementById("updateModal").classList.remove("hidden");
+}
+
+function closeUpdate() {
+  document.getElementById("updateModal").classList.add("hidden");
+}
+
+function openUpdateRelease() {
+  if (_lastUpdate && _lastUpdate.url) openExternal(_lastUpdate.url);
+  closeUpdate();
+}
+
+function openAbout() {
+  document.getElementById("aboutModal").classList.remove("hidden");
+}
+
+function closeAbout() {
+  document.getElementById("aboutModal").classList.add("hidden");
+}
+
+// ── Stop / Cancel ──
+
+function cancelAll() {
+  document.querySelectorAll('.danger').forEach(function(b) {
+    b.disabled = true; b.textContent = "⏹ Останавливаю...";
+  });
+  if (window.pywebview) {
+    window.pywebview.api.cancel_all()
+      .then(function() { resetStopButtons(); })
+      .catch(function() { resetStopButtons(); });
+  }
+}
+function resetStopButtons() {
+  document.querySelectorAll('.danger').forEach(function(b) {
+    b.disabled = false; b.textContent = "⏹ Остановить";
+  });
+}
+
+// ── Output directory ──
+
+function refreshOutputDir() {
+  if (!window.pywebview) return;
+  window.pywebview.api.get_output_dir().then(function(path) {
+    const el = document.getElementById("outputDirPath");
+    if (!el) return;
+    el.textContent = path;
+    el.title = path;
+    renderLog(`[INFO] Output directory: ${path}`);
+  });
+}
+
+function chooseOutputDir() {
+  log("choosing output directory...");
+  if (window.pywebview) {
+    window.pywebview.api.choose_output_dir().then(function(path) {
+      refreshOutputDir();
+      log("output directory: " + path);
+    }, function(err) {
+      log("choose output dir failed: " + err);
+    });
+  }
+}
+
+function openOutputDir() {
+  if (window.pywebview) {
+    window.pywebview.api.open_output_dir().then(function() {}, function(err) {
+      log("open output dir failed: " + err);
+    });
+  }
+}
+
+// ── CDP Bar ──
+
+function refreshCdpStatus() {
+  if (window.pywebview) {
+    window.pywebview.api.get_cdp_status().then(function(state) {
+      updateCdpBar(state);
+    }, function(err) {
+      // TICKET-002-J: bridge not ready — keep last state, don't lie.
+      log("CDP status unavailable: " + err);
+    });
+  }
+}
+
+function updateCdpBar(state) {
+  var indicator = document.getElementById("cdpIndicator");
+  var btnStart = document.getElementById("btnStartCdp");
+  var btnStop = document.getElementById("btnStopCdp");
+  var btnRestart = document.getElementById("btnRestartCdp");
+  if (state === "running") {
+    indicator.innerHTML = '🔗 CDP: <span class="status-dot" style="color:#0ea56a;">●</span> запущен';
+    btnStart.classList.add("hidden");
+    btnStop.classList.remove("hidden");
+    btnRestart.classList.remove("hidden");
+    btnStart.disabled = false;
+    btnStart.textContent = "▶ Запустить Chrome";
+  } else if (state === "starting") {
+    indicator.innerHTML = '🔗 CDP: <span class="status-dot" style="color:#f0b400;">◐</span> запускается...';
+    btnStart.disabled = true;
+    btnStart.textContent = "Запуск...";
+    btnStart.classList.remove("hidden");
+    btnStop.classList.add("hidden");
+    btnRestart.classList.add("hidden");
+  } else {
+    indicator.innerHTML = '🔗 CDP: <span class="status-dot" style="color:#4a5568;">○</span> не запущен';
+    btnStart.disabled = false;
+    btnStart.textContent = "▶ Запустить Chrome";
+    btnStart.classList.remove("hidden");
+    btnStop.classList.add("hidden");
+    btnRestart.classList.add("hidden");
+  }
+}
+
+function startCdp() {
+  log("starting Chrome CDP...");
+  updateCdpBar("starting");
+  if (window.pywebview) {
+    window.pywebview.api.launch_chrome().then(
+      function() { refreshCdpStatus(); },
+      function(err) { log("CDP start failed: " + err); refreshCdpStatus(); }
+    );
+  }
+}
+
+function stopCdp() {
+  log("stopping Chrome...");
+  if (window.pywebview) {
+    window.pywebview.api.close_chrome().then(
+      function() { refreshCdpStatus(); },
+      function(err) { log("CDP stop failed: " + err); }
+    );
+  }
+}
+
+function restartCdp() {
+  log("restarting Chrome CDP...");
+  stopCdp();
+  setTimeout(startCdp, 2000);
+}
+
+// ── Sync ──
+
+function getActiveUrl() {
+  const textarea = document.getElementById("dsUrls");
+  const start = textarea.selectionStart;
+  const lines = textarea.value.split("\n");
+
+  let pos = 0;
+  for (let i = 0; i < lines.length; i++) {
+    pos += lines[i].length + 1;
+    if (start <= pos) {
+      const url = lines[i].trim();
+      if (url) return url;
+      break;
+    }
+  }
+  // fallback: first non-empty line
+  for (let i = 0; i < lines.length; i++) {
+    const url = lines[i].trim();
+    if (url) return url;
+  }
+  return "";
+}
+
+function _runSync(urls, btn) {
+  btn.disabled = true;
+  btn.textContent = "Exporting...";
+  if (window.pywebview) {
+    window.pywebview.api.sync_provider(JSON.stringify(urls)).then(
+      function() {
+        btn.disabled = false;
+        btn.textContent = btn.id === "btnSyncAll"
+          ? "Синхронизировать DeepSeek"
+          : "Синхронизировать выбранный чат";
+        log("export complete");
+        setBridgeStatus("ready");
+      },
+      function(err) {
+        btn.disabled = false;
+        btn.textContent = btn.id === "btnSyncAll"
+          ? "Синхронизировать DeepSeek"
+          : "Синхронизировать выбранный чат";
+        log("export error: " + err);
+      }
+    );
+  }
+}
+
+function syncAllDeepSeek() {
+  const el = document.getElementById("dsUrls");
+  const urls = el.value.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
+
+  if (urls.length === 0) {
+    log("sync all: auto-discovering URLs from sidebar...");
+  } else {
+    log("sync all: " + urls.length + " urls");
+  }
+
+  _runSync(urls, document.getElementById("btnSyncAll"));
+}
+
+function syncSelected() {
+  const url = getActiveUrl();
+
+  if (!url) {
+    log("no URL selected — put cursor on a line or add at least one URL");
+    return;
+  }
+
+  log("sync selected: " + url.slice(0, 50) + "...");
+  _runSync([url], document.getElementById("btnSyncSelected"));
+}
+
+function syncAll() {
+  log("sync all providers...");
+  if (window.pywebview) {
+    window.pywebview.api.sync_all();
+  }
+}
+
+function setSyncRunning(running) {
+  var btn = document.querySelector('.sync-all');
+  if (btn) {
+    btn.disabled = running;
+    btn.textContent = running ? "Синхронизация..." : "Синхронизировать всё";
+  }
+}
+
+function setProviderSync(provider, status) {
+  var map = { 'gemini':'Gemini', 'qwen':'Qwen', 'chatgpt':'ChatGPT', 'claude':'Claude', 'deepseek':'DeepSeek',
+              'custom1':'Custom1', 'custom2':'Custom2' };
+  var dot = document.getElementById('pv' + map[provider]);
+  if (!dot) return;
+  var cls = { 'idle':'dot-off', 'running':'dot-syncing', 'done':'dot-on', 'failed':'dot-failed' };
+  dot.className = 'pv-dot ' + (cls[status] || 'dot-off');
+
+  // Tab sync state
+  var tab = document.querySelector('.tab[data-provider="' + provider + '"]');
+  if (tab) {
+    tab.classList.remove('syncing', 'sync-failed');
+    if (status === 'running') tab.classList.add('syncing');
+    if (status === 'failed')  tab.classList.add('sync-failed');
+  }
+}
+
+// ── Custom API (generate & save) ──
+
+var CUSTOM_MASK = "••••••••";
+var CUSTOM_KEEP = "__KEEP__"; // sentinel: backend keeps the stored key
+
+function _customPrefix(slot) { return slot === 1 ? "c1" : "c2"; }
+
+function _customCollect(slot) {
+  var p = _customPrefix(slot);
+  var mode = document.getElementById(p + "Mode").value;
+  var cfg = { mode: mode };
+  if (mode === "web") {
+    cfg.url = document.getElementById(p + "Url").value.trim();
+    cfg.chat_list_selector = document.getElementById(p + "ChatListSelector").value.trim();
+    cfg.title_selector = document.getElementById(p + "TitleSelector").value.trim();
+    cfg.message_selector = document.getElementById(p + "MessageSelector").value.trim();
+    cfg.user_message_selector = document.getElementById(p + "UserMessageSelector").value.trim();
+    cfg.assistant_message_selector = document.getElementById(p + "AssistantMessageSelector").value.trim();
+    cfg.scroll_container_selector = document.getElementById(p + "ScrollContainerSelector").value.trim();
+    cfg.wait_after_click_ms = parseInt(document.getElementById(p + "WaitAfterClickMs").value, 10) || 2000;
+    cfg.list_chats_js = document.getElementById(p + "ListChatsJs").value;
+    cfg.extract_messages_js = document.getElementById(p + "ExtractMessagesJs").value;
+  } else {
+    var keyField = document.getElementById(p + "ApiKey");
+    var keyVal = keyField.value.trim();
+    var hasKey = keyField.dataset.hasKey === "1";
+    var apiKey = ((keyVal === CUSTOM_MASK && hasKey) || (keyVal === "" && hasKey)) ? CUSTOM_KEEP : keyVal;
+    var timeout = parseInt(document.getElementById(p + "Timeout").value, 10);
+    cfg.endpoint = document.getElementById(p + "Endpoint").value.trim();
+    cfg.protocol = document.getElementById(p + "Protocol").value;
+    cfg.model = document.getElementById(p + "Model").value.trim();
+    cfg.api_key = apiKey;
+    cfg.system_prompt = document.getElementById(p + "SystemPrompt").value;
+    cfg.timeout = (timeout >= 5 && timeout <= 300) ? timeout : 30;
+  }
+  return cfg;
+}
+
+function toggleCustomMode(slot) {
+  var p = _customPrefix(slot);
+  var mode = document.getElementById(p + "Mode").value;
+  var apiCfg = document.getElementById(p + "ApiConfig");
+  var webCfg = document.getElementById(p + "WebConfig");
+  var apiActions = document.getElementById(p + "ApiActions");
+  var webActions = document.getElementById(p + "WebActions");
+  if (mode === "web") {
+    apiCfg.classList.add("hidden");
+    webCfg.classList.remove("hidden");
+    apiActions.classList.add("hidden");
+    webActions.classList.remove("hidden");
+  } else {
+    apiCfg.classList.remove("hidden");
+    webCfg.classList.add("hidden");
+    apiActions.classList.remove("hidden");
+    webActions.classList.add("hidden");
+  }
+}
+
+function _customApply(slot, cfg) {
+  var p = _customPrefix(slot);
+  cfg = cfg || {};
+  var mode = cfg.mode || "api";
+  document.getElementById(p + "Mode").value = mode;
+  toggleCustomMode(slot);
+  if (mode === "web") {
+    document.getElementById(p + "Url").value = cfg.url || "";
+    document.getElementById(p + "ChatListSelector").value = cfg.chat_list_selector || "";
+    document.getElementById(p + "TitleSelector").value = cfg.title_selector || "";
+    document.getElementById(p + "MessageSelector").value = cfg.message_selector || "";
+    document.getElementById(p + "UserMessageSelector").value = cfg.user_message_selector || "";
+    document.getElementById(p + "AssistantMessageSelector").value = cfg.assistant_message_selector || "";
+    document.getElementById(p + "ScrollContainerSelector").value = cfg.scroll_container_selector || "";
+    document.getElementById(p + "WaitAfterClickMs").value = cfg.wait_after_click_ms || 2000;
+    document.getElementById(p + "ListChatsJs").value = cfg.list_chats_js || "";
+    document.getElementById(p + "ExtractMessagesJs").value = cfg.extract_messages_js || "";
+  } else {
+    document.getElementById(p + "Endpoint").value = cfg.endpoint || "";
+    document.getElementById(p + "Protocol").value = cfg.protocol || "openai";
+    document.getElementById(p + "Model").value = cfg.model || "";
+    var keyField = document.getElementById(p + "ApiKey");
+    keyField.value = cfg.has_api_key ? CUSTOM_MASK : "";
+    keyField.dataset.hasKey = cfg.has_api_key ? "1" : "0";
+    document.getElementById(p + "SystemPrompt").value = cfg.system_prompt || "";
+    document.getElementById(p + "Timeout").value = cfg.timeout || 30;
+  }
+  _customRefreshBadge(slot, cfg);
+}
+
+function _customRefreshBadge(slot, cfg) {
+  // TICKET-002-F: badge = config readiness only. Tab dot = live connection
+  // and is managed solely by connect (true) / disconnect (false) handlers.
+  var badge = document.getElementById(_customPrefix(slot) + "Badge");
+  var mode = (cfg && cfg.mode) || "api";
+  var ready = false;
+  if (mode === "web") {
+    ready = cfg && cfg.url;
+  } else {
+    ready = cfg && cfg.endpoint && cfg.model;
+  }
+  badge.textContent = ready ? "готов" : "не настроен";
+  badge.className = ready ? "badge ok" : "badge";
+}
+
+function loadCustomConfigs() {
+  [1, 2].forEach(function(slot) {
+    if (!window.pywebview) return;
+    window.pywebview.api.get_custom_config(slot).then(function(cfg) {
+      _customApply(slot, cfg);
+    }).catch(function(err) { log("custom" + slot + ": config load failed: " + err); });
+  });
+}
+
+var _customPresetsCache = [];
+
+// v1 mapping preset -> web config (TICKET-002-E, rules 1-5 of 002-B v2).
+function _presetToWebConfig(preset) {
+  var s = preset.strategy || {};
+  var sels = s.selectors || {};
+  var scripts = s.scripts || {};
+  return {
+    mode: "web",
+    url: preset.default_url || "",
+    chat_list_selector: sels.chat_list_selector || "",
+    title_selector: sels.title_selector || "",
+    message_selector: sels.message_selector || "",
+    user_message_selector: sels.user_message_selector || "",
+    assistant_message_selector: sels.assistant_message_selector || "",
+    scroll_container_selector: sels.scroll_container_selector || "",
+    wait_after_click_ms: s.wait_after_click_ms || 2000,
+    list_chats_js: scripts.list_chats_js || "",
+    extract_messages_js: scripts.extract_messages_js || ""
+  };
+}
+
+function loadCustomPresets() {
+  if (!window.pywebview) return;
+  window.pywebview.api.list_presets().then(function(presets) {
+    _customPresetsCache = presets || [];
+    [1, 2].forEach(function(slot) {
+      var sel = document.getElementById(_customPrefix(slot) + "PresetSelect");
+      if (!sel) return;
+      sel.innerHTML = '<option value="">Выберите preset</option>';
+      _customPresetsCache.forEach(function(p) {
+        var opt = document.createElement("option");
+        opt.value = p.id;
+        var nav = (p.strategy && p.strategy.navigation) || "goto";
+        opt.textContent = p.name + (nav === "click" ? " (click)" : "");
+        sel.appendChild(opt);
+      });
+    });
+  }).catch(function(err) { log("presets load failed: " + err); });
+}
+
+function applyCustomPreset(slot) {
+  var sel = document.getElementById(_customPrefix(slot) + "PresetSelect");
+  var hint = document.getElementById(_customPrefix(slot) + "PresetHint");
+  var presetId = sel ? sel.value : "";
+  if (!presetId) { if (hint) { hint.textContent = "Выберите preset"; hint.classList.remove("hidden"); } return; }
+  var preset = null;
+  _customPresetsCache.forEach(function(p) { if (p.id === presetId) preset = p; });
+  if (!preset) { if (hint) { hint.textContent = "Preset не найден"; hint.classList.remove("hidden"); } return; }
+  var p = _customPrefix(slot);
+  if (hint) {
+    var notes = [];
+    // TICKET-002-F: _customCollect in web mode never returns endpoint/model,
+    // so read the (hidden but valued) API fields directly.
+    var epEl = document.getElementById(p + "Endpoint");
+    var mdEl = document.getElementById(p + "Model");
+    var hasApi = (epEl && epEl.value.trim()) || (mdEl && mdEl.value.trim());
+    if (hasApi) {
+      notes.push("Применение web-preset сбросит API-поля слота в значения по умолчанию.");
+    }
+    var nav = (preset.strategy && preset.strategy.navigation) || "goto";
+    if (nav === "click") notes.push("Preset типа click: проверка через Сканировать ограничена goto.");
+    notes.push("URL можно менять после Apply — preset от этого не сбрасывается.");
+    if (notes.length) { hint.textContent = notes.join(" "); hint.classList.remove("hidden"); }
+    else hint.classList.add("hidden");
+  }
+  _customApply(slot, _presetToWebConfig(preset));
+  saveCustom(slot).then(function() {
+    return window.pywebview.api.bind_preset(slot, presetId);
+  }).then(function() {
+    log("custom" + slot + ": preset applied: " + presetId);
+  }).catch(function(err) { log("custom" + slot + ": apply preset failed: " + err); });
+}
+
+function saveCustom(slot) {
+  if (!window.pywebview) return Promise.reject("no bridge");
+  var cfg = _customCollect(slot);
+  return window.pywebview.api.set_custom_config(slot, JSON.stringify(cfg)).then(function() {
+    log("custom" + slot + ": настройки сохранены");
+    return window.pywebview.api.get_custom_config(slot).then(function(saved) {
+      _customApply(slot, saved);
+      return saved;
+    });
+  }, function(err) {
+    log("custom" + slot + ": сохранение не удалось: " + err);
+    throw err;
+  });
+}
+
+function testCustom(slot) {
+  var resBox = document.getElementById(_customPrefix(slot) + "TestResult");
+  resBox.classList.remove("hidden");
+  resBox.className = "custom-test";
+  resBox.textContent = "проверка...";
+  var cfg = _customCollect(slot);
+  if ((cfg.mode || "api") === "web") {
+    // TICKET-002-G: web is verified via check_custom_web (counts + verdict).
+    var presetSel = document.getElementById(_customPrefix(slot) + "PresetSelect");
+    var presetId = (presetSel && presetSel.value) || "";
+    resBox.textContent = "проверка preset...";
+    window.pywebview.api.check_custom_web(slot, presetId).then(function(res) {
+      res = res || {};
+      var lines = [
+        "Preset: " + (res.preset_id || "ручные поля"),
+        "Список чатов: " + ((res.chat_list_N > 0 ? "✓ " : "✗ ") + (res.chat_list_N || 0)),
+        "Сообщения: " + ((res.messages_N > 0 ? "✓ " : "✗ ") + (res.messages_N || 0)),
+        "User: " + (res.user_N || 0) + "  Assistant: " + (res.assistant_N || 0),
+        "Scroll: " + (res.scroll || "?"),
+        "",
+        res.verdict === "Compatible" ? "Preset совместим — можно экспортировать"
+          : res.verdict === "Partial" ? "Частично: попробуйте экспорт вручную"
+          : res.reason === "wrong_page" ? "Возможно, не та страница — проверьте URL (это подсказка, не запрет)"
+          : res.reason === "page_dead" ? "Страница не жива — подключитесь заново"
+          : res.reason === "format_invalid" ? "Preset невалиден — проверьте каталог"
+          : res.reason === "no_match" ? "Селекторы ничего не нашли — preset не подходит для этой страницы"
+          : res.reason === "timeout" ? "Проверка не успела — повторите Test"
+          : "Preset не подходит для этой страницы. Попробуйте другой preset."
+      ];
+      resBox.textContent = lines.join("\n");
+      resBox.className = "custom-test " + (res.verdict === "Compatible" ? "ok" : res.verdict === "Partial" ? "" : "err");
+    }, function(err) {
+      resBox.textContent = "✗ " + err;
+      resBox.className = "custom-test err";
+    });
+    return;
+  }
+  if (!cfg.endpoint || !cfg.model) {
+    resBox.textContent = "✗ Укажите Endpoint и Model";
+    resBox.className = "custom-test err";
+    return;
+  }
+  window.pywebview.api.test_custom(slot, JSON.stringify(cfg)).then(function(res) {
+    res = res || {};
+    if (res.ok) {
+      resBox.textContent = "✓ Connection OK — model: " + (res.model || "?") + " · ответ: " + (res.response || "");
+      resBox.className = "custom-test ok";
+    } else {
+      resBox.textContent = "✗ " + (res.error || "неизвестная ошибка") + (res.http_status ? " [HTTP " + res.http_status + "]" : "");
+      resBox.className = "custom-test err";
+    }
+  }, function(err) {
+    resBox.textContent = "✗ " + err;
+    resBox.className = "custom-test err";
+  });
+}
+
+function generateCustom(slot) {
+  var prompt = document.getElementById(_customPrefix(slot) + "Prompt").value.trim();
+  if (!prompt) {
+    log("custom" + slot + ": введите промпт");
+    return;
+  }
+  var btn = document.getElementById(slot === 1 ? "btnCustom1Gen" : "btnCustom2Gen");
+  btn.disabled = true;
+  btn.textContent = "Generating...";
+  saveCustom(slot).then(function() {
+    return window.pywebview.api.generate_custom(slot, prompt);
+  }).then(function() {
+    btn.disabled = false;
+    btn.textContent = "Generate & Save";
+  }, function(err) {
+    log("custom" + slot + ": " + err);
+    btn.disabled = false;
+    btn.textContent = "Generate & Save";
+  });
+}
+
+function connectCustomWeb(slot) {
+  if (!window.pywebview) return;
+  var p = _customPrefix(slot);
+  var url = document.getElementById(p + "Url").value.trim();
+  if (!url) {
+    log("custom" + slot + ": укажите URL сервиса");
+    return;
+  }
+  saveCustom(slot).then(function() {
+    log("custom" + slot + ": подключение к " + url + "...");
+    return window.pywebview.api.connect_custom_web(slot, url);
+  }).then(function() {
+    log("custom" + slot + ": подключено");
+    // TICKET-002-F: tab dot = connection, badge = config readiness.
+    setTabConnectionState('custom' + slot, true);
+  }, function(err) {
+    log("custom" + slot + ": ошибка подключения: " + err);
+  });
+}
+
+function disconnectCustomWeb(slot) {
+  if (!window.pywebview) return;
+  window.pywebview.api.disconnect_custom_web(slot).then(function() {
+    log("custom" + slot + ": отключено");
+    setTabConnectionState('custom' + slot, false);
+    // TICKET-002-F: disconnect drops the page, not the config readiness.
+    _customRefreshBadge(slot, _customCollect(slot));
+  }, function(err) {
+    log("custom" + slot + ": ошибка отключения: " + err);
+  });
+}
+
+function scanCustomWeb(slot) {
+  if (!window.pywebview) return;
+  var p = _customPrefix(slot);
+  var chatListEl = document.getElementById(p + "ChatList");
+  chatListEl.classList.remove("hidden");
+  chatListEl.textContent = "сканирование...";
+  window.pywebview.api.scan_custom_web(slot).then(function(chats) {
+    chatListEl.innerHTML = "";
+    if (!chats || chats.length === 0) {
+      chatListEl.textContent = "чаты не найдены";
+      return;
+    }
+    chats.forEach(function(chat) {
+      var div = document.createElement("div");
+      div.className = "chat-item";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.className = "chat-check";
+      box.tabIndex = -1;
+      var label = document.createElement("span");
+      label.className = "chat-title";
+      label.textContent = chat.title || chat.id;
+      div.appendChild(box);
+      div.appendChild(label);
+      div.dataset.url = chat.url || "";
+      div.dataset.index = chat._index;
+      div.dataset.id = chat.id || "";
+      div.dataset.title = chat.title || "";
+      div.onclick = function(ev) {
+        // TICKET-002-J: checkbox is the visible selection control.
+        if (ev && ev.target === box) {
+          div.classList.toggle("selected", box.checked);
+          return;
+        }
+        box.checked = !box.checked;
+        div.classList.toggle("selected", box.checked);
+      };
+      chatListEl.appendChild(div);
+    });
+    var btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = "Экспорт выбранных";
+    btn.onclick = function() { exportCustomWebSelected(slot); };
+    chatListEl.appendChild(btn);
+  }, function(err) {
+    chatListEl.textContent = "ошибка: " + err;
+  });
+}
+
+function exportCustomWebSelected(slot) {
+  if (!window.pywebview) return;
+  var p = _customPrefix(slot);
+  var items = document.querySelectorAll("#" + p + "ChatList .chat-item.selected");
+  var chats = [];
+  items.forEach(function(el) {
+    var url = el.dataset.url || "";
+    var idx = el.dataset.index;
+    var obj = { url: url };
+    if (idx !== undefined && idx !== "") obj._index = parseInt(idx, 10);
+    // TICKET-002-J: carry id/title so the writer keeps distinct files.
+    if (el.dataset.id) obj.id = el.dataset.id;
+    if (el.dataset.title) obj.title = el.dataset.title;
+    chats.push(obj);
+  });
+  if (chats.length === 0) {
+    log("custom" + slot + ": выберите чаты для экспорта");
+    return;
+  }
+  log("custom" + slot + ": экспорт " + chats.length + " чатов...");
+  window.pywebview.api.export_custom_web(slot, JSON.stringify(chats)).then(function() {
+    log("custom" + slot + ": экспорт запущен");
+  }, function(err) {
+    log("custom" + slot + ": ошибка экспорта: " + err);
+  });
+}
+
+function reconnect() {
+  log("reconnect DeepSeek");
+  if (window.pywebview) {
+    window.pywebview.api.reconnect().then(
+      function() {
+        log("reconnect complete");
+      },
+      function(err) {
+        log("reconnect failed: " + err);
+      }
+    );
+  }
+}
+
+// ── Sidebar ──
+
+function copyLogContent() {
+  const text = document.getElementById("log").textContent;
+  navigator.clipboard.writeText(text).catch(function() {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  });
+}
+
+function toggleSidebar() {
+  document.getElementById("sidebar").classList.toggle("open");
+}
+
+function saveChatLog() {
+  const text = document.getElementById("log").textContent;
+  if (window.pywebview) {
+    window.pywebview.api.save_ui_snapshot(text);
+  }
+}
+
+// ── Log feed handler (called from Python via evaluate_js) ──
+
+function pushLog(msg) {
+  renderLog(msg);
+}
+
+function addChatUrl(url) {
+  const ta = document.getElementById("dsUrls");
+  const lines = ta.value.split("\n").map(function(s) { return s.trim(); }).filter(Boolean);
+  if (lines.indexOf(url) === -1) {
+    lines.push(url);
+    ta.value = lines.join("\n");
+    log("URL: " + url.slice(0, 50) + "...");
+  }
+}
+
+function autoRestore() {
+  if (window.pywebview) {
+    window.pywebview.api.add_account('https://chat.deepseek.com/')
+      .then(function(res) {
+        if (res === 'OK') {
+          log('auto-restore OK');
+          setConnected();
+        }
+      })
+      .catch(function(err) { log('auto-restore: ' + err); });
+  }
+}
+
+function setWaiting(seconds) {
+  const badge = document.querySelector(".deepseek .badge");
+  badge.textContent = "ожидание " + seconds + "s";
+  badge.className = "badge waiting";
+}
+
+// ── Gemini ──
+
+function addGeminiAccount() {
+  log("connecting Gemini...");
+  if (window.pywebview) {
+    window.pywebview.api.connect_gemini().then(
+      function() {
+        log("Gemini connected");
+        setGeminiConnected();
+      },
+      function(err) {
+        log("Gemini connect failed: " + err);
+      }
+    );
+  }
+}
+
+function setGeminiConnected() {
+  document.querySelector(".gemini .badge").textContent = "1 подключено";
+  document.querySelector(".gemini .badge").className = "badge ok";
+  document.getElementById("gmEmpty").style.display = "none";
+  document.getElementById("gmAccount").classList.remove("hidden");
+  document.getElementById("geminiUrls").classList.remove("hidden");
+  document.getElementById("btnGeminiSyncAll").disabled = false;
+  document.getElementById("btnGeminiSyncSelected").disabled = false;
+  document.getElementById("pvGemini").className = "pv-dot dot-on";
+  setTabConnectionState('gemini', true);
+  setBridgeStatus("gemini connected");
+}
+
+function getActiveGeminiUrl() {
+  const textarea = document.getElementById("gmUrls");
+  const start = textarea.selectionStart;
+  const lines = textarea.value.split("\n");
+  let pos = 0;
+  for (let i = 0; i < lines.length; i++) {
+    pos += lines[i].length + 1;
+    if (start <= pos) {
+      const url = lines[i].trim();
+      if (url) return url;
+      break;
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const url = lines[i].trim();
+    if (url) return url;
+  }
+  return "";
+}
+
+function _runGeminiSync(urls, btn) {
+  btn.disabled = true;
+  btn.textContent = "Exporting...";
+  if (window.pywebview) {
+    window.pywebview.api.sync_gemini(JSON.stringify(urls))
+      .then(function(resp) {
+        btn.disabled = false;
+        btn.textContent = btn.id === "btnGeminiSyncAll"
+          ? "Синхронизировать Gemini"
+          : "Синхронизировать выбранный чат";
+        if (resp && resp.ok) {
+          log("[GEMINI] exported: " + resp.count + " msgs → " + resp.path);
+        } else {
+          log("[GEMINI] export queued");
+        }
+        setBridgeStatus("ready");
+      })
+      .catch(function(err) {
+        btn.disabled = false;
+        btn.textContent = btn.id === "btnGeminiSyncAll"
+          ? "Синхронизировать Gemini"
+          : "Синхронизировать выбранный чат";
+        log("[GEMINI ERROR] " + (err.message || err));
+      });
+  }
+}
+
+function syncGeminiAll() {
+  log("Gemini sync all: auto-discovering URLs from sidebar...");
+  _runGeminiSync([], document.getElementById("btnGeminiSyncAll"));
+}
+
+function syncGeminiSelected() {
+  const url = getActiveGeminiUrl();
+  if (!url) {
+    log("no Gemini URL selected");
+    return;
+  }
+  log("Gemini sync selected: " + url.slice(0, 50) + "...");
+  _runGeminiSync([url], document.getElementById("btnGeminiSyncSelected"));
+}
+
+function reconnectGemini() {
+  log("reconnect Gemini");
+  addGeminiAccount();
+}
+
+// ── Qwen ──
+
+function addQwenAccount() {
+  log("connecting Qwen...");
+  if (window.pywebview) {
+    window.pywebview.api.connect_qwen().then(
+      function() {
+        log("Qwen connected");
+        setQwenConnected();
+      },
+      function(err) {
+        log("Qwen connect failed: " + err);
+      }
+    );
+  }
+}
+
+function setQwenConnected() {
+  document.querySelector(".qwen .badge").textContent = "1 подключено";
+  document.querySelector(".qwen .badge").className = "badge ok";
+  document.getElementById("qwEmpty").style.display = "none";
+  document.getElementById("qwAccount").classList.remove("hidden");
+  document.getElementById("qwenUrls").classList.remove("hidden");
+  document.getElementById("btnQwenSyncAll").disabled = false;
+  document.getElementById("btnQwenSyncSelected").disabled = false;
+  document.getElementById("pvQwen").className = "pv-dot dot-on";
+  setTabConnectionState('qwen', true);
+  setBridgeStatus("qwen connected");
+}
+
+function getActiveQwenUrl() {
+  const textarea = document.getElementById("qwUrls");
+  const start = textarea.selectionStart;
+  const lines = textarea.value.split("\n");
+  let pos = 0;
+  for (let i = 0; i < lines.length; i++) {
+    pos += lines[i].length + 1;
+    if (start <= pos) {
+      let url = lines[i].trim();
+      if (url) {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+        return url;
+      }
+      break;
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    let url = lines[i].trim();
+    if (url) {
+      if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+      return url;
+    }
+  }
+  return "";
+}
+
+function _runQwenSync(urls, btn) {
+  btn.textContent = "Exporting...";
+  if (window.pywebview) {
+    window.pywebview.api.sync_qwen(JSON.stringify(urls))
+      .then(function(resp) {
+        btn.textContent = btn.id === "btnQwenSyncAll"
+          ? "Синхронизировать Qwen"
+          : "Синхронизировать выбранный чат";
+        if (resp && resp.ok) {
+          log("[QWEN] exported: " + resp.count + " msgs → " + resp.path);
+        } else {
+          log("[QWEN] export queued");
+        }
+        setBridgeStatus("ready");
+      })
+      .catch(function(err) {
+        btn.textContent = btn.id === "btnQwenSyncAll"
+          ? "Синхронизировать Qwen"
+          : "Синхронизировать выбранный чат";
+        log("[QWEN ERROR] " + (err.message || err));
+      });
+  }
+}
+
+function syncQwenAll() {
+  log("Qwen sync all: auto-discovering URLs from sidebar...");
+  _runQwenSync([], document.getElementById("btnQwenSyncAll"));
+}
+
+function syncQwenSelected() {
+  const url = getActiveQwenUrl();
+  if (!url) {
+    log("no Qwen URL selected");
+    return;
+  }
+  log("Qwen sync selected: " + url.slice(0, 50) + "...");
+  _runQwenSync([url], document.getElementById("btnQwenSyncSelected"));
+}
+
+function reconnectQwen() {
+  log("reconnect Qwen");
+  addQwenAccount();
+}
+
+// ── ChatGPT ──
+
+function addChatGPTAccount() {
+  log("connecting ChatGPT...");
+  if (window.pywebview) {
+    window.pywebview.api.connect_chatgpt().then(
+      function() {
+        log("ChatGPT connected");
+        setChatGPTConnected();
+      },
+      function(err) {
+        log("ChatGPT connect failed: " + err);
+      }
+    );
+  }
+}
+
+function setChatGPTConnected() {
+  document.querySelector(".chatgpt .badge").textContent = "1 подключено";
+  document.querySelector(".chatgpt .badge").className = "badge ok";
+  document.getElementById("cgEmpty").style.display = "none";
+  document.getElementById("cgAccount").classList.remove("hidden");
+  document.getElementById("chatgptUrls").classList.remove("hidden");
+  document.getElementById("btnChatGPTSyncAll").disabled = false;
+  document.getElementById("btnChatGPTSyncSelected").disabled = false;
+  document.getElementById("pvChatGPT").className = "pv-dot dot-on";
+  setTabConnectionState('chatgpt', true);
+  setBridgeStatus("chatgpt connected");
+}
+
+function getActiveChatGPTUrl() {
+  const textarea = document.getElementById("cgUrls");
+  const start = textarea.selectionStart;
+  const lines = textarea.value.split("\n");
+  let pos = 0;
+  for (let i = 0; i < lines.length; i++) {
+    pos += lines[i].length + 1;
+    if (start <= pos) {
+      let url = lines[i].trim();
+      if (url) {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+        return url;
+      }
+      break;
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    let url = lines[i].trim();
+    if (url) {
+      if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+      return url;
+    }
+  }
+  return "";
+}
+
+function _runChatGPTSync(urls, btn) {
+  btn.textContent = "Exporting...";
+  if (window.pywebview) {
+    window.pywebview.api.sync_chatgpt(JSON.stringify(urls))
+      .then(function(resp) {
+        btn.textContent = btn.id === "btnChatGPTSyncAll"
+          ? "Синхронизировать ChatGPT"
+          : "Синхронизировать выбранный чат";
+        if (resp && resp.ok) {
+          log("[CHATGPT] exported: " + resp.count + " msgs → " + resp.path);
+        } else {
+          log("[CHATGPT] export queued");
+        }
+        setBridgeStatus("ready");
+      })
+      .catch(function(err) {
+        btn.textContent = btn.id === "btnChatGPTSyncAll"
+          ? "Синхронизировать ChatGPT"
+          : "Синхронизировать выбранный чат";
+        log("[CHATGPT ERROR] " + (err.message || err));
+      });
+  }
+}
+
+function syncChatGPTAll() {
+  log("ChatGPT sync all: auto-discovering URLs from sidebar...");
+  _runChatGPTSync([], document.getElementById("btnChatGPTSyncAll"));
+}
+
+function syncChatGPTSelected() {
+  const url = getActiveChatGPTUrl();
+  if (!url) {
+    log("no ChatGPT URL selected");
+    return;
+  }
+  log("ChatGPT sync selected: " + url.slice(0, 50) + "...");
+  _runChatGPTSync([url], document.getElementById("btnChatGPTSyncSelected"));
+}
+
+function reconnectChatGPT() {
+  log("reconnect ChatGPT");
+  addChatGPTAccount();
+}
+
+// ── Claude ──
+
+function addClaudeAccount() {
+  log("connecting Claude...");
+  if (window.pywebview) {
+    window.pywebview.api.connect_claude().then(
+      function() {
+        log("Claude connected");
+        setClaudeConnected();
+      },
+      function(err) {
+        log("Claude connect failed: " + err);
+      }
+    );
+  }
+}
+
+function setClaudeConnected() {
+  document.querySelector(".claude .badge").textContent = "1 подключено";
+  document.querySelector(".claude .badge").className = "badge ok";
+  document.getElementById("clEmpty").style.display = "none";
+  document.getElementById("clAccount").classList.remove("hidden");
+  document.getElementById("claudeUrls").classList.remove("hidden");
+  document.getElementById("btnClaudeSyncAll").disabled = false;
+  document.getElementById("btnClaudeSyncSelected").disabled = false;
+  document.getElementById("pvClaude").className = "pv-dot dot-on";
+  setTabConnectionState('claude', true);
+  setBridgeStatus("claude connected");
+}
+
+function getActiveClaudeUrl() {
+  const textarea = document.getElementById("clUrls");
+  const start = textarea.selectionStart;
+  const lines = textarea.value.split("\n");
+  let pos = 0;
+  for (let i = 0; i < lines.length; i++) {
+    pos += lines[i].length + 1;
+    if (start <= pos) {
+      let url = lines[i].trim();
+      if (url) {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+        return url;
+      }
+      break;
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    let url = lines[i].trim();
+    if (url) {
+      if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+      return url;
+    }
+  }
+  return "";
+}
+
+function _runClaudeSync(urls, btn) {
+  btn.textContent = "Exporting...";
+  if (window.pywebview) {
+    window.pywebview.api.sync_claude(JSON.stringify(urls))
+      .then(function(resp) {
+        btn.textContent = btn.id === "btnClaudeSyncAll"
+          ? "Синхронизировать Claude"
+          : "Синхронизировать выбранный чат";
+        if (resp && resp.ok) {
+          log("[CLAUDE] exported: " + resp.count + " msgs → " + resp.path);
+        } else {
+          log("[CLAUDE] export queued");
+        }
+        setBridgeStatus("ready");
+      })
+      .catch(function(err) {
+        btn.textContent = btn.id === "btnClaudeSyncAll"
+          ? "Синхронизировать Claude"
+          : "Синхронизировать выбранный чат";
+        log("[CLAUDE ERROR] " + (err.message || err));
+      });
+  }
+}
+
+function syncClaudeAll() {
+  log("Claude sync all: auto-discovering URLs from sidebar...");
+  _runClaudeSync([], document.getElementById("btnClaudeSyncAll"));
+}
+
+function syncClaudeSelected() {
+  const url = getActiveClaudeUrl();
+  if (!url) {
+    log("no Claude URL selected");
+    return;
+  }
+  log("Claude sync selected: " + url.slice(0, 50) + "...");
+  _runClaudeSync([url], document.getElementById("btnClaudeSyncSelected"));
+}
+
+function reconnectClaude() {
+  log("reconnect Claude");
+  addClaudeAccount();
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  setTimeout(fadeSplash, 2500);
+  setTimeout(refreshCdpStatus, 500);
+  // TICKET-002-J: re-sync CDP state (Chrome may start/stop outside the UI).
+  setInterval(refreshCdpStatus, 10000);
+  setTimeout(refreshOutputDir, 300);
+  setTimeout(refreshVersion, 400);
+  setTimeout(checkForUpdate, 2000);
+  setTimeout(loadCustomConfigs, 600);
+  setTimeout(loadCustomPresets, 700);
+
+  // Qwen DnD fix for pywebview — explicit event handlers for textarea
+  const qw = document.getElementById("qwUrls");
+  if (qw) {
+    qw.addEventListener("dragover", function(e) { e.preventDefault(); });
+    qw.addEventListener("drop", function(e) {
+      e.preventDefault();
+      const text = (e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/uri-list") || "").trim();
+      if (text) {
+        const start = this.selectionStart;
+        const end = this.selectionEnd;
+        this.value = this.value.substring(0, start) + text + this.value.substring(end);
+        this.selectionStart = this.selectionEnd = start + text.length;
+        this.dispatchEvent(new Event("input", { bubbles: true }));
+        this.dispatchEvent(new Event("change", { bubbles: true }));
+        return;
+      }
+      // Fallback: file drop (blob or .txt)
+      const files = e.dataTransfer.files;
+      if (files && files.length > 0) {
+        const reader = new FileReader();
+        reader.onload = function(ev) {
+          const content = ev.target.result;
+          const start = qw.selectionStart;
+          const end = qw.selectionEnd;
+          qw.value = qw.value.substring(0, start) + content + qw.value.substring(end);
+          qw.selectionStart = qw.selectionEnd = start + content.length;
+          qw.dispatchEvent(new Event("input", { bubbles: true }));
+          qw.dispatchEvent(new Event("change", { bubbles: true }));
+        };
+        reader.readAsText(files[0]);
+      }
+    });
+  }
+});

@@ -1,0 +1,2396 @@
+import json
+import os
+import queue
+import re
+import sys
+import threading
+import time as time_module
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import datetime
+
+import webview
+
+from core.logger import LogBuffer
+from adapters.gemini import GeminiAdapter
+from adapters.deepseek import DeepSeekAdapter
+from adapters.qwen import QwenAdapter
+from adapters.chatgpt import ChatGPTAdapter
+from adapters.claude import ClaudeAdapter
+from adapters.custom import CustomAdapter
+from adapters.cdp_manager import CDPManager
+from core.custom_config import (
+    KEEP_KEY,
+    custom_config_ready,
+    load_custom_config,
+    save_custom_config,
+    sanitize_config_for_display,
+)
+from conversation.enrichment import Enricher, RuntimeData, BlobEntry, TraceEntry, AnchorData
+from exporters.writer import ExportWriter
+
+
+def _resolve_ui_url():
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    for candidate in (
+        os.path.join(exe_dir, "ui", "app.html"),
+        os.path.join(exe_dir, "_internal", "ui", "app.html"),
+        os.path.join(os.getcwd(), "ui", "app.html"),
+    ):
+        if os.path.isfile(candidate):
+            return "file:///" + candidate.replace("\\", "/")
+    return "ui/app.html"
+
+
+def _resolve_seed_path():
+    """Bundled seed catalog path (TICKET-002-I).
+
+    Frozen: next to the exe (_MEIPASS/_internal first); dev: repo root
+    (this file's dir) or cwd. Returns "" when no seed is bundled.
+    """
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "presets", "seed_presets.json"))
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    candidates += [
+        os.path.join(exe_dir, "presets", "seed_presets.json"),
+        os.path.join(exe_dir, "_internal", "presets", "seed_presets.json"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets", "seed_presets.json"),
+        os.path.join(os.getcwd(), "presets", "seed_presets.json"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _resolve_storage():
+    """Resolve storage dir for config.json: next to exe (portable) when writable,
+    otherwise %LOCALAPPDATA%\\AIChatExporter (installed)."""
+    if getattr(sys, "frozen", False):
+        primary = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        primary = os.getcwd()
+    config = os.path.join(primary, "config.json")
+    try:
+        os.makedirs(primary, exist_ok=True)
+        if not os.path.exists(config):
+            tmp = config + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("{}")
+            os.replace(tmp, config)
+        return primary, config
+    except OSError:
+        fb = os.path.join(
+            os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+            "AIChatExporter",
+        )
+        os.makedirs(fb, exist_ok=True)
+        return fb, os.path.join(fb, "config.json")
+
+
+class _FileLogWriter:
+    """Safe tee for stdout/stderr -> file. Tolerant to None/MSVCrt + flush() contracts."""
+
+    def __init__(self, path):
+        self._f = open(path, "a", encoding="utf-8", errors="replace")
+
+    def write(self, data):
+        try:
+            self._f.write(str(data))
+            self._f.flush()
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self._f.flush()
+        except Exception:
+            pass
+
+
+def _install_stderr_logging():
+    """Redirect stdout/stderr and excepthook to storage logs/app.log (no console in frozen GUI)."""
+    try:
+        storage, _ = _resolve_storage()
+        logs_dir = os.path.join(storage, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        w = _FileLogWriter(os.path.join(logs_dir, "app.log"))
+        if sys.stdout is not None:
+            sys.stdout = w
+        if sys.stderr is not None:
+            sys.stderr = w
+
+        def _hook(tp, val, tb):
+            try:
+                import traceback
+                w.write("".join(traceback.format_exception(tp, val, tb)) + "\n")
+            except Exception:
+                pass
+
+        sys.excepthook = _hook
+    except Exception:
+        pass
+
+
+@dataclass
+class CaptureContext:
+    cdp_assets: list = field(default_factory=list)
+    runtime: RuntimeData = field(default_factory=RuntimeData)
+    anchor: AnchorData = field(default_factory=AnchorData)
+
+
+def capture_cdp_if_needed(provider_name, page, push_log=None):
+    if provider_name != "chatgpt":
+        return CaptureContext()
+    from exporters.attachment_capture import AttachmentCDPCapture as ACC
+    import time as _t
+
+    capture_cdp = ACC(page)
+    capture_cdp.start()
+
+    anchor = page.evaluate("""(() => ({ perf: performance.now(), epoch: Date.now() }))()""")
+    anchor_data = AnchorData(
+        perf_zero=anchor["perf"] / 1000,
+        epoch_zero=anchor["epoch"] / 1000,
+    )
+
+    page.evaluate("""(() => {
+        const trace = [];
+        new MutationObserver(ms => {
+            for (const m of ms) {
+                if (m.type === 'childList')
+                    for (const n of m.addedNodes)
+                        if (n.tagName === 'IMG' && n.src)
+                            trace.push({ src: n.src, t: performance.now(), kind: 'added' });
+                if (m.type === 'attributes' && m.target.tagName === 'IMG' && m.target.src)
+                    trace.push({ src: m.target.src, t: performance.now(), kind: 'attr' });
+            }
+            if (trace.length > 2000) trace.splice(0, trace.length - 2000);
+        }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+        window.__img_trace = trace;
+    })()""")
+
+    page.evaluate("""(async () => {
+        const c = document.querySelector('[data-testid="conversation-scroll"]')
+               || document.querySelector('[data-testid="conversation-turns"]')
+               || document.scrollingElement;
+        if (!c) return;
+        c.scrollTop = c.scrollHeight;
+        c.dispatchEvent(new Event('scroll'));
+        await new Promise(r => setTimeout(r, 3000));
+    })()""")
+
+    if push_log:
+        push_log("[CDP] capturing trace + blob assets from runtime...")
+    raw = page.evaluate("""(async () => {
+        const trace = (window.__img_trace || []).slice();
+        const blobs = [];
+        for (const entry of trace) {
+            if (entry.src.startsWith('blob:')) {
+                try {
+                    const r = await fetch(entry.src);
+                    const buf = await r.arrayBuffer();
+                    const bytes = new Uint8Array(buf);
+                    let binary = '';
+                    for (let j = 0; j < bytes.length; j++)
+                        binary += String.fromCharCode(bytes[j]);
+                    blobs.push({ src: entry.src, b64: btoa(binary), ctype: r.headers.get('content-type') || 'image/png', t: entry.t });
+                } catch(e) {}
+            }
+        }
+        return { trace, blobs };
+    })()""")
+    page.evaluate("window.__img_trace = []")
+
+    capture_cdp.stop()
+
+    runtime_data = RuntimeData(
+        trace=[TraceEntry(**e) for e in raw["trace"]],
+        blobs=[BlobEntry(**b) for b in raw["blobs"]],
+    )
+    if push_log:
+        push_log(f"[CDP] trace={len(runtime_data.trace)} entries, blobs={len(runtime_data.blobs)}")
+
+    return CaptureContext(cdp_assets=capture_cdp.assets, runtime=runtime_data, anchor=anchor_data)
+
+
+MAX_LOGIN_SOFT = 600
+MAX_LOGIN_HARD = 1800
+
+
+class Cancelled(Exception):
+    pass
+
+
+class API:
+    def __init__(self, app):
+        self._app = app
+
+    def add_account(self, url):
+        return self._app.add_account(url)
+
+    def sync_provider(self, urls_json):
+        return self._app.sync_provider(urls_json)
+
+    def reconnect(self):
+        return self._app.reconnect()
+
+    def sync_all(self, urls_json="[]"):
+        self._app.log.add("[INFO] sync_all triggered (sequential)")
+        threading.Thread(target=self._app._do_sync_all, daemon=True).start()
+        return "OK"
+
+    def add_gemini_account(self, url):
+        return self._app.add_gemini_account(url)
+
+    def sync_gemini(self, urls_json):
+        return self._app.sync_gemini(urls_json)
+
+    def reconnect_gemini(self):
+        return self._app.reconnect_gemini()
+
+    def launch_chrome(self):
+        return self._app.launch_chrome_cdp()
+
+    def get_cdp_status(self):
+        return self._app.cdp.state
+
+    def get_providers_status(self):
+        a = self._app
+        return {
+            "gemini": a._gemini_connect_state == "connected",
+            "qwen": a._qwen_connected,
+            "chatgpt": a._chatgpt_connected,
+            "claude": a._claude_connected,
+            "deepseek": a.pw is not None,
+        }
+
+    def connect_gemini(self):
+        return self._app.add_gemini_account("cdp")
+
+    def close_chrome(self):
+        self._app._close_cdp_browser()
+        return "OK"
+
+    def cancel_all(self):
+        a = self._app
+        a._cancel_flag = True
+        a._cancel_version += 1
+        a._soft_stop()
+        a.log.add("[INFO] Cancel requested — cooperative stop")
+
+    def connect_qwen(self):
+        return self._app.add_qwen_account()
+
+    def sync_qwen(self, urls_json):
+        return self._app.sync_qwen(urls_json)
+
+    def connect_chatgpt(self):
+        return self._app.add_chatgpt_account()
+
+    def sync_chatgpt(self, urls_json):
+        return self._app.sync_chatgpt(urls_json)
+
+    def connect_claude(self):
+        return self._app.add_claude_account()
+
+    def sync_claude(self, urls_json):
+        return self._app.sync_claude(urls_json)
+
+    def get_custom_config(self, slot):
+        return self._app.get_custom_config(slot)
+
+    def set_custom_config(self, slot, config_json):
+        return self._app.set_custom_config(slot, config_json)
+
+    def test_custom(self, slot, config_json):
+        return self._app.test_custom(slot, config_json)
+
+    def generate_custom(self, slot, prompt):
+        return self._app.sync_custom(slot, prompt)
+
+    def connect_custom_web(self, slot, url):
+        return self._app.connect_custom_web(slot, url)
+
+    def disconnect_custom_web(self, slot):
+        return self._app.disconnect_custom_web(slot)
+
+    def scan_custom_web(self, slot):
+        return self._app.scan_custom_web(slot)
+
+    def check_custom_web(self, slot, preset_id=""):
+        return self._app.check_custom_web(slot, preset_id)
+
+    def export_custom_web(self, slot, urls_json="[]"):
+        import json as _json
+        slot = int(slot)
+        if self._app._get_custom_mode(slot) != "web":
+            raise RuntimeError(f"Custom{slot}: not in web mode")
+        if not getattr(self._app, f"_custom{slot}_connected", False):
+            raise RuntimeError(f"Custom{slot}: not connected")
+        urls = _json.loads(urls_json) if isinstance(urls_json, str) else urls_json
+        name = f"custom{slot}"
+        self._app._gw_queue.put(("export_provider", (name, urls)))
+        return "STARTED"
+
+    def list_presets(self):
+        """Read the preset catalog. [] on missing/broken file (TICKET-002-E).
+
+        TICKET-002-I: on a missing file, seed it once from the bundled
+        seed catalog (never overwrite an existing user file).
+        """
+        import json as _json
+        import shutil as _shutil
+
+        from core.preset_engine import filter_valid_presets, resolve_catalog_path
+
+        try:
+            path = resolve_catalog_path(self._app._storage_dir)
+            if not os.path.exists(path):
+                seed = _resolve_seed_path()
+                if seed:
+                    _shutil.copy(seed, path)
+            with open(path, encoding="utf-8") as f:
+                data = _json.load(f)
+            presets = data if isinstance(data, list) else data.get("presets", [])
+            valid = filter_valid_presets(presets)
+            # Single source for click-resolve (002-D) and diagnostics (002-G).
+            self._app._preset_catalog = valid
+            return valid
+        except Exception:
+            return []
+
+    def bind_preset(self, slot, preset_id):
+        return self._app.bind_preset(slot, preset_id)
+
+    def connect_deepseek(self):
+        return self._app.add_account("https://chat.deepseek.com/")
+
+    def save_ui_snapshot(self, content):
+        threading.Thread(
+            target=self._app.save_ui_snapshot,
+            args=(content,),
+            daemon=True
+        ).start()
+        return "OK"
+
+    def get_log(self):
+        return self._app.log.get()
+
+    def save_log(self):
+        logs_dir = os.path.join(self._app._storage_dir, "logs")
+        try:
+            os.makedirs(logs_dir, exist_ok=True)
+        except OSError:
+            logs_dir = os.getcwd()
+        path = os.path.join(logs_dir, f"debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        lines = self._app.log.get().splitlines()
+        trimmed = "\n".join(lines[-200:])
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(trimmed)
+        return path
+
+    def get_output_dir(self):
+        return self._app.get_output_dir()
+
+    def choose_output_dir(self):
+        result = self._app.window.create_file_dialog(webview.FileDialog.FOLDER)
+        if result and result[0]:
+            return self._app.set_output_dir(result[0])
+        return self._app.get_output_dir()
+
+    def open_output_dir(self):
+        return self._app.open_output_dir()
+
+    def get_version(self):
+        return self._app.get_version()
+
+    def check_update(self):
+        return self._app.check_update()
+
+    def open_external(self, url):
+        if isinstance(url, str) and url.startswith("http"):
+            import webbrowser
+            webbrowser.open(url)
+        return "OK"
+
+
+def _check_cdp_alive():
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=1) as r:
+            return "webSocketDebuggerUrl" in json.load(r)
+    except Exception:
+        return False
+
+
+# ── App version + update check (GitHub Releases only) ──
+
+APP_VERSION = "0.6.0"
+REPO_OWNER = "Nordggs"
+REPO_NAME = "Project_AI_Base"
+
+
+def _version_tuple(v):
+    parts = []
+    for p in str(v).lstrip("v").replace("-", ".").split("."):
+        if p.isdigit():
+            parts.append(int(p))
+        else:
+            break
+    return tuple(parts) or (0,)
+
+
+def _fetch_latest_release():
+    try:
+        with urllib.request.urlopen(
+            f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest",
+            timeout=8,
+        ) as r:
+            data = json.load(r)
+    except Exception:
+        return None
+    if data.get("draft") or data.get("prerelease"):
+        return None
+    tag = (data.get("tag_name") or "").strip()
+    url = (data.get("html_url") or "").strip()
+    if not tag:
+        return None
+    return {"tag": tag, "url": url}
+
+
+# ── Preset diagnostics (TICKET-002-G): pure helpers, no page/App ──
+
+_DIAG_COUNTS_JS = """(arg) => {
+    const c = (s) => {
+        try { return s ? document.querySelectorAll(s).length : 0; }
+        catch (e) { return 0; }
+    };
+    return {
+        chats: c(arg.chatSel),
+        messages: c(arg.msgSel),
+        user: c(arg.userSel),
+        assistant: c(arg.asstSel)
+    };
+}"""
+
+_MAX_UNKNOWN_FRACTION = 0.2
+
+
+def _domain_of(url):
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(url or "").hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:
+        return ""
+
+
+def _diagnose_verdict(chats, messages, user, asst, page_url, default_url):
+    """Verdict + reason from counts (thresholds from PoC matrix 002-C).
+
+    chats <= 0 is always Incompatible: export finds nothing without a
+    chat list (e.g. title-empty links dropped by the list filter).
+    """
+    unknown = max(0, messages - user - asst)
+    roles_ok = user > 0 and asst > 0 and unknown <= max(1, int(messages * _MAX_UNKNOWN_FRACTION))
+    if chats <= 0:
+        if default_url and _domain_of(page_url) and _domain_of(page_url) != _domain_of(default_url):
+            return "Incompatible", "wrong_page"
+        return "Incompatible", "no_match"
+    if messages <= 0 or not roles_ok:
+        return "Partial", "no_match" if messages <= 0 else "ok"
+    return "Compatible", "ok"
+
+
+def _preset_to_web_config(preset):
+    """Minimal v1 mapping preset -> web config (mirrors JS _presetToWebConfig)."""
+    strategy = preset.get("strategy", {})
+    sels = strategy.get("selectors", {})
+    scripts = strategy.get("scripts", {})
+    return {
+        "mode": "web",
+        "url": preset.get("default_url", "") or "",
+        "chat_list_selector": sels.get("chat_list_selector", "") or "",
+        "title_selector": sels.get("title_selector", "") or "",
+        "message_selector": sels.get("message_selector", "") or "",
+        "user_message_selector": sels.get("user_message_selector", "") or "",
+        "assistant_message_selector": sels.get("assistant_message_selector", "") or "",
+        "scroll_container_selector": sels.get("scroll_container_selector", "") or "",
+        "wait_after_click_ms": strategy.get("wait_after_click_ms") or 2000,
+        "list_chats_js": scripts.get("list_chats_js", "") or "",
+        "extract_messages_js": scripts.get("extract_messages_js", "") or "",
+    }
+
+
+class App:
+    def __init__(self):
+        self.api = API(self)
+        self.window = webview.create_window(
+            "AI Chat Exporter",
+            url=_resolve_ui_url(),
+            js_api=self.api,
+            width=1300,
+            height=750,
+        )
+        self.log = LogBuffer()
+        self.pw = None
+        self._auto_reconnecting = False
+        self._seen_urls = set()
+        self._locks = {
+            "deepseek": threading.Lock(),
+            "gemini": threading.Lock(),
+            "qwen": threading.Lock(),
+            "chatgpt": threading.Lock(),
+            "claude": threading.Lock(),
+            "custom1": threading.Lock(),
+            "custom2": threading.Lock(),
+        }
+        self._sync_state = {
+            "gemini": "idle", "qwen": "idle",
+            "chatgpt": "idle", "claude": "idle", "deepseek": "idle",
+            "custom1": "idle", "custom2": "idle",
+        }
+        self._sync_done_events = {}
+        self._sync_results = {}
+
+        # Playwright actor: single-thread queue
+        self._pw_queue = queue.Queue()
+        self._connect_done = threading.Event()
+        self._connect_error = None
+        self._last_watched_url = ""
+        self._export_active = False
+        self._cancel_flag = False
+        self._cancel_version = 0
+        self._close_pw_done = threading.Event()
+        self._close_gw_done = threading.Event()
+
+        # Output storage: dev → project dir; frozen → next to exe (portable),
+        # fallback to %LOCALAPPDATA%\AIChatExporter when exe dir is not writable (installed).
+        self._storage_dir, self._config_path = _resolve_storage()
+        self._output_dir = self._load_output_dir()
+        if self._output_dir is None:
+            self._output_dir = self._default_output_dir()
+            try:
+                self._save_output_dir(self._output_dir)
+            except OSError:
+                pass
+        os.makedirs(self._output_dir, exist_ok=True)
+        self.log.add(f"[INFO] Output directory: {self._output_dir}")
+
+        threading.Thread(target=self._pw_worker, daemon=True).start()
+
+        # Gemini + Qwen + ChatGPT + Claude worker (CDP providers)
+        self.gemini_page = None
+        self._gw_queue = queue.Queue()
+        self._connect_gemini_done = threading.Event()
+        self._gemini_export_active = False
+        self._gemini_connect_lock = False
+        self._gemini_connect_state = "idle"  # idle | connecting | connected
+        self._cdp_lock = threading.Lock()
+
+        # Qwen (CDP page in same browser as Gemini)
+        self.qwen_page = None
+        self._qwen_connected = False
+        self._qwen_connect_lock = False
+        self._connect_qwen_done = threading.Event()
+        self._qwen_export_active = False
+        self._qwen_session_epoch = 0
+
+        # ChatGPT (CDP page in same browser as Gemini)
+        self.chatgpt_page = None
+        self._chatgpt_connected = False
+        self._chatgpt_connect_lock = False
+        self._connect_chatgpt_done = threading.Event()
+        self._chatgpt_export_active = False
+        self._chatgpt_session_epoch = 0
+
+        # Claude (CDP page in same browser as Gemini)
+        self.claude_page = None
+        self._claude_connected = False
+        self._claude_connect_lock = False
+        self._connect_claude_done = threading.Event()
+        self._claude_export_active = False
+        self._claude_session_epoch = 0
+
+        # Custom Web providers
+        self.custom1_page = None
+        self.custom2_page = None
+        self._custom1_connected = False
+        self._custom2_connected = False
+        # TICKET-002-D: slot->preset_id binding + in-memory preset catalog.
+        # Binding lives in memory only (config filters strip unknown keys);
+        # on loss (restart) navigation falls back to "goto".
+        self._preset_binding = {}
+        self._preset_catalog = []
+
+        # CDP Manager — единый Chrome для всех провайдеров
+        self._file_log = None
+        try:
+            _logs_dir = os.path.join(self._storage_dir, "logs")
+            os.makedirs(_logs_dir, exist_ok=True)
+            self._file_log = _FileLogWriter(os.path.join(_logs_dir, "app.log"))
+        except OSError:
+            pass
+        self.cdp = CDPManager(log=self.log, file_log=self._file_log)
+        self._cdp_start_thread = None
+
+        threading.Thread(target=self._gw_worker, daemon=True).start()
+
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.ui_log_path = None
+        self.ui_snapshot_path = None
+        try:
+            _logs_dir = os.path.join(self._storage_dir, "logs")
+            os.makedirs(_logs_dir, exist_ok=True)
+            self.ui_log_path = os.path.join(_logs_dir, f"ui_session_{self.session_id}.log")
+            self.ui_snapshot_path = os.path.join(_logs_dir, f"ui_snapshot_{self.session_id}.log")
+            open(self.ui_log_path, "a").close()
+            open(self.ui_snapshot_path, "a").close()
+        except OSError:
+            self.log.add(f"[WARN] cannot create logs in {self._storage_dir}")
+
+        if os.path.exists(os.path.join(self._storage_dir, ".cookies", "playwright")):
+            self.log.add("[INFO] Saved cookies found, will auto-restore session...")
+            t = threading.Thread(target=self._try_restore_session, daemon=True)
+            t.start()
+
+
+
+    # ── Login detection ──
+
+    def _is_logged_in(self, page, log_reason=False):
+        try:
+            raw = page.evaluate("""
+                () => JSON.stringify({
+                    readyState: document.readyState,
+                    href: location.href,
+                    hasMessages: document.querySelectorAll('.ds-message').length > 0,
+                    hasInput: document.querySelector('textarea, [contenteditable="true"]') !== null,
+                    hasDS: document.querySelector('.ds-scroll-area, .the-header') !== null,
+                    isLogin: location.href.includes('login')
+                })
+            """)
+            info = json.loads(raw)
+            if info.get("readyState") != "complete":
+                if log_reason:
+                    self.log.add(f"[LOGIN] page not ready: {info['readyState']}")
+                return False
+            if info.get("isLogin"):
+                if log_reason:
+                    self.log.add(f"[LOGIN] login page: {info['href'][:80]}")
+                return False
+            logged = info.get("hasMessages") or info.get("hasInput") or info.get("hasDS")
+            if not logged and log_reason:
+                self.log.add(f"[LOGIN] no signals: {info}")
+            return logged
+        except Exception as e:
+            if log_reason:
+                self.log.add(f"[LOGIN] evaluate error: {e}")
+            return False
+
+    # ── Cancel infrastructure ──
+
+    def _check_cancel(self):
+        if self._cancel_flag:
+            raise Cancelled()
+
+    def _soft_stop(self):
+        for q in (self._pw_queue, self._gw_queue):
+            try:
+                q.put(("soft_stop", ""))
+            except Exception:
+                pass
+
+    def pw_call(self, fn, *args, timeout=30, **kwargs):
+        version = self._cancel_version
+        try:
+            result = fn(*args, timeout=timeout * 1000, **kwargs)
+        except Exception:
+            if self._cancel_flag or version != self._cancel_version:
+                raise Cancelled()
+            raise
+        if self._cancel_flag or version != self._cancel_version:
+            raise Cancelled()
+        return result
+
+    def _is_page_alive(self, page):
+        try:
+            page.evaluate("1")
+            return True
+        except Exception:
+            return False
+
+    def _cdp_browser(self):
+        if self._gw_browser:
+            try:
+                self._gw_browser.contexts
+                return self._gw_browser
+            except Exception:
+                self._gw_browser = None
+        self._gw_browser = self._gw_pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+        return self._gw_browser
+
+    # ── Qwen sidebar navigation helpers ──
+
+    def _click_qwen_chat(self, index):
+        """Click the index-th chat in the Qwen sidebar (re-query DOM each time)."""
+        self.qwen_page.evaluate("""(i) => {
+            const items = document.querySelectorAll('div.chat-item-drag a.chat-item-drag-link');
+            items[i]?.click();
+        }""", index)
+
+    def _wait_qwen_messages(self, timeout=30000):
+        """Wait for messages to appear AND a /c/ URL (post-click invariant)."""
+        self.qwen_page.wait_for_function("""() => {
+            const msgs = document.querySelectorAll('[class*="message"]');
+            return msgs.length > 0 && location.href.includes('/c/');
+        }""", timeout=timeout)
+
+    def _load_qwen_sidebar(self):
+        """Navigate to chat.qwen.ai/ and wait for sidebar to render. Returns item count."""
+        self.qwen_page.goto("https://chat.qwen.ai/", wait_until="domcontentloaded", timeout=30000)
+        self.qwen_page.wait_for_timeout(3000)
+        total = self.qwen_page.evaluate("document.querySelectorAll('div.chat-item-drag').length")
+        if total < 5:
+            self.qwen_page.wait_for_timeout(3000)
+            total = self.qwen_page.evaluate("document.querySelectorAll('div.chat-item-drag').length")
+        return total
+
+    # ── Page resolver (find sidebar page, not export tab) ──
+
+    def _main_page(self):
+        try:
+            if not self.pw:
+                return None
+            for p in self.pw._context.pages:
+                try:
+                    url = p.url
+                    if "chat.deepseek.com" in url and "/chat/s/" not in url:
+                        return p
+                except Exception:
+                    continue
+            return self.pw.page if hasattr(self.pw, "page") else None
+        except Exception:
+            return None
+
+    # ── Playwright worker (single thread, sole owner of self.pw) ──
+
+    def _pw_worker(self):
+        while True:
+            try:
+                cmd, arg = self._pw_queue.get(timeout=1)
+            except queue.Empty:
+                self._watch_url()
+                continue
+
+            try:
+                if cmd == "connect":       self._do_connect(arg)
+                elif cmd == "reconnect":   self._do_reconnect()
+                elif cmd == "soft_stop":
+                    if self.pw and self.pw.page:
+                        try:
+                            self.pw.page.evaluate("window.stop()")
+                        except Exception:
+                            pass
+                elif cmd == "close_cdp":
+                    try:
+                        if self.pw:
+                            self.pw.close()
+                    except Exception:
+                        pass
+                    self.pw = None
+                    self._close_pw_done.set()
+                elif cmd == "export_provider":
+                    name, urls = arg
+                    try:
+                        res = self._export_provider(name, urls)
+                        self._sync_results[name] = res or {"provider": name}
+                    finally:
+                        self._export_active = False
+                        ev = self._sync_done_events.pop(name, None)
+                        if ev:
+                            ev.set()
+            except Exception as e:
+                self.log.add(f"[ERROR] _pw_worker cmd={cmd}: {e}")
+                self._push_log(f"ERR: {e}")
+                if cmd in ("connect", "reconnect"):
+                    self._connect_error = str(e)
+                    self._connect_done.set()
+
+            self._watch_url()
+
+    # ── Gemini worker (isolated single-owner) ──
+
+    def _gw_worker(self):
+        from playwright.sync_api import sync_playwright
+        self._gw_pw = sync_playwright().start()
+        self._gw_browser = None
+
+        while True:
+            try:
+                cmd, arg = self._gw_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            try:
+                if cmd == "connect_gemini":      self._do_connect_gemini(arg)
+                elif cmd == "soft_stop":
+                    for page in [self.qwen_page, self.gemini_page, self.chatgpt_page, self.claude_page,
+                                 getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
+                        try:
+                            if page:
+                                page.evaluate("window.stop()")
+                        except Exception:
+                            pass
+                elif cmd == "close_cdp":
+                    for page in [self.gemini_page, self.qwen_page, self.chatgpt_page, self.claude_page,
+                                 getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
+                        try:
+                            if page:
+                                page.close()
+                        except Exception:
+                            pass
+                    try:
+                        if self._gw_browser:
+                            self._gw_browser.close()
+                    except Exception:
+                        pass
+                    self._close_gw_done.set()
+                elif cmd == "export_provider":
+                    name, urls = arg
+                    try:
+                        res = self._export_provider(name, urls)
+                        self._sync_results[name] = res or {"provider": name}
+                    finally:
+                        reset = {"gemini": "_gemini_export_active", "qwen": "_qwen_export_active",
+                                 "chatgpt": "_chatgpt_export_active", "claude": "_claude_export_active"}
+                        flag = reset.get(name)
+                        if flag:
+                            setattr(self, flag, False)
+                        ev = self._sync_done_events.pop(name, None)
+                        if ev:
+                            ev.set()
+                elif cmd == "export_custom":
+                    name, prompt = arg
+                    try:
+                        res = self._export_provider(name, None, prompt=prompt)
+                        self._sync_results[name] = res or {"provider": name}
+                    finally:
+                        ev = self._sync_done_events.pop(name, None)
+                        if ev:
+                            ev.set()
+                elif cmd == "connect_qwen":
+                    with self._cdp_lock:
+                        self._do_connect_qwen()
+                    self._connect_qwen_done.set()
+                elif cmd == "connect_chatgpt":
+                    with self._cdp_lock:
+                        self._do_connect_chatgpt()
+                    self._connect_chatgpt_done.set()
+                elif cmd == "connect_claude":
+                    with self._cdp_lock:
+                        self._do_connect_claude()
+                    self._connect_claude_done.set()
+                elif cmd == "connect_custom1":
+                    try:
+                        with self._cdp_lock:
+                            self._do_connect_custom(1, arg)
+                    except Exception as e:
+                        self._sync_results["connect_custom1_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("connect_custom1", None)
+                        if ev:
+                            ev.set()
+                elif cmd == "connect_custom2":
+                    try:
+                        with self._cdp_lock:
+                            self._do_connect_custom(2, arg)
+                    except Exception as e:
+                        self._sync_results["connect_custom2_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("connect_custom2", None)
+                        if ev:
+                            ev.set()
+                elif cmd == "disconnect_custom1":
+                    self._do_disconnect_custom(1)
+                    ev = self._sync_done_events.pop("disconnect_custom1", None)
+                    if ev:
+                        ev.set()
+                elif cmd == "disconnect_custom2":
+                    self._do_disconnect_custom(2)
+                    ev = self._sync_done_events.pop("disconnect_custom2", None)
+                    if ev:
+                        ev.set()
+                elif cmd == "scan_custom1":
+                    try:
+                        chats = self._do_scan_custom(1)
+                        self._sync_results["scan_custom1"] = chats
+                    except Exception as e:
+                        self._sync_results["scan_custom1"] = []
+                        self._sync_results["scan_custom1_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("scan_custom1", None)
+                        if ev:
+                            ev.set()
+                elif cmd == "scan_custom2":
+                    try:
+                        chats = self._do_scan_custom(2)
+                        self._sync_results["scan_custom2"] = chats
+                    except Exception as e:
+                        self._sync_results["scan_custom2"] = []
+                        self._sync_results["scan_custom2_error"] = str(e)
+                    finally:
+                        ev = self._sync_done_events.pop("scan_custom2", None)
+                        if ev:
+                            ev.set()
+                elif cmd == "check_custom1":
+                    self._run_check_cmd(cmd, 1, arg)
+                elif cmd == "check_custom2":
+                    self._run_check_cmd(cmd, 2, arg)
+            except Exception as e:
+                self.log.add(f"[ERROR] _gw_worker cmd={cmd}: {e}")
+                self._push_log(f"Gemini ERR: {e}")
+                if cmd == "connect_gemini":
+                    self._connect_gemini_done.set()
+                elif cmd == "connect_qwen":
+                    self._connect_qwen_done.set()
+                elif cmd == "connect_chatgpt":
+                    self._connect_chatgpt_done.set()
+                elif cmd == "connect_claude":
+                    self._connect_claude_done.set()
+                elif cmd.startswith("connect_custom"):
+                    ev = self._sync_done_events.pop(cmd, None)
+                    if ev:
+                        ev.set()
+                elif cmd.startswith("scan_custom"):
+                    ev = self._sync_done_events.pop(cmd, None)
+                    if ev:
+                        ev.set()
+                elif cmd.startswith("check_custom"):
+                    ev = self._sync_done_events.pop(cmd, None)
+                    if ev:
+                        ev.set()
+
+    def _do_connect(self, url):
+        self.log.add("[INFO] Connecting DeepSeek account...")
+        self.log_ui_event("add_account start")
+
+        if self.pw:
+            self.pw.close()
+            self.pw = None
+
+        from playwright.sync_api import sync_playwright
+        from adapters.cdp_manager import CDPContext
+        self.cdp.start()
+        pw_obj = sync_playwright().start()
+        ds_browser = pw_obj.chromium.connect_over_cdp("http://127.0.0.1:9222")
+        pw = CDPContext(pw_obj, ds_browser)
+        pw.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        start = time_module.time()
+        _login_attempts = 0
+        while True:
+            _login_attempts += 1
+            if self._is_logged_in(pw.page, log_reason=(_login_attempts == 1)):
+                self.log.add("[INFO] DeepSeek account connected")
+                self.log_ui_event("add_account connected")
+                self.pw = pw
+                self._connect_error = None
+                self._connect_done.set()
+                self._seen_urls.clear()
+                self._last_watched_url = ""
+                try:
+                    self.window.evaluate_js("setConnected()")
+                except Exception:
+                    pass
+                return
+
+            elapsed = time_module.time() - start
+
+            hard_limit = 30 if self._auto_reconnecting else MAX_LOGIN_HARD
+            if elapsed > hard_limit:
+                pw.close()
+                if self._auto_reconnecting:
+                    self.log.add("[WARN] Auto-restore DeepSeek session timed out (30s)")
+                    self._connect_error = "Auto-restore timeout — please login manually"
+                else:
+                    self._connect_error = f"Login timeout ({MAX_LOGIN_HARD // 60} min)"
+                self._connect_done.set()
+                raise RuntimeError(self._connect_error)
+
+            if elapsed > MAX_LOGIN_SOFT and int(elapsed) % 10 == 0:
+                self.log.add(f"[WARN] Login taking longer than expected ({int(elapsed)}s)")
+
+            try:
+                self.window.evaluate_js(f"setWaiting({int(elapsed)})")
+            except Exception:
+                pass
+
+            time_module.sleep(2)
+
+    def _do_reconnect(self):
+        self.log.add("[INFO] Reconnecting DeepSeek...")
+        self.log_ui_event("reconnect")
+        if self.pw:
+            self.pw.close()
+            self.pw = None
+        self._do_connect("https://chat.deepseek.com/")
+
+    # ── Gemini connection (isolated single-owner) ──
+
+    def _do_connect_gemini(self, arg):
+        self.log.add("[INFO] Connecting to Gemini via CDP...")
+        if self.cdp.state != "running":
+            raise RuntimeError("CDP not running — launch Chrome first")
+
+        if self.gemini_page:
+            try:
+                self.gemini_page.close()
+            except Exception:
+                pass
+            self.gemini_page = None
+
+        try:
+            browser = self._cdp_browser()
+            page = browser.contexts[0].new_page()
+            page.goto("https://gemini.google.com/", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_load_state("domcontentloaded")
+
+            if not self._is_page_alive(page):
+                raise RuntimeError("Page not alive after navigation")
+
+            self.gemini_page = page
+            self._gemini_connect_state = "connected"
+            self._connect_gemini_done.set()
+            try:
+                self.window.evaluate_js("setGeminiConnected()")
+            except Exception:
+                pass
+            self.log.add("[INFO] Gemini connected via CDP")
+        except Exception as e:
+            self._gemini_connect_state = "idle"
+            self.log.add(f"[ERROR] CDP attach failed: {e}")
+            raise
+
+    def _ensure_gemini_page(self):
+        if self.gemini_page and self._is_page_alive(self.gemini_page):
+            return self.gemini_page
+        browser = self._cdp_browser()
+        self.gemini_page = browser.contexts[0].new_page()
+        return self.gemini_page
+
+    def _gemini_nav_home(self, page):
+        try:
+            page.goto("https://gemini.google.com/", wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+
+    # ── Unified adapter + pipeline layer (replaces all per-provider batch methods) ──
+
+    def _page_for(self, name):
+        return {
+            "deepseek": self.pw.page if self.pw else None,
+            "gemini": self.gemini_page,
+            "qwen": self.qwen_page,
+            "chatgpt": self.chatgpt_page,
+            "claude": self.claude_page,
+            "custom1": getattr(self, "custom1_page", None),
+            "custom2": getattr(self, "custom2_page", None),
+        }.get(name)
+
+    def _adapter_for(self, name, page):
+        if name in ("custom1", "custom2"):
+            slot = 1 if name == "custom1" else 2
+            cfg = load_custom_config(self._config_path, slot)
+            if str(cfg.get("mode", "api")).strip().lower() == "web":
+                from adapters.custom_web import CustomWebAdapter
+                return CustomWebAdapter(
+                    page, cfg, self._push_log, self._check_cancel,
+                    self._preset_navigation(slot),
+                )
+            return CustomAdapter(slot, cfg, self._push_log, self._check_cancel)
+        switch = {
+            "deepseek": lambda: DeepSeekAdapter(page, self.log, self._check_cancel),
+            "gemini": lambda: GeminiAdapter(page, self._push_log, self._check_cancel, self._cancel_version),
+            "qwen": lambda: QwenAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
+            "chatgpt": lambda: ChatGPTAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
+            "claude": lambda: ClaudeAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
+        }
+        fn = switch.get(name)
+        if fn is None:
+            raise ValueError(f"Unknown adapter: {name}")
+        return fn()
+
+    def _export_provider(self, name, urls=None, prompt=None):
+        display = {"chatgpt": "ChatGPT", "deepseek": "DeepSeek", "gemini": "Gemini",
+                   "qwen": "Qwen", "claude": "Claude",
+                   "custom1": "Custom 1", "custom2": "Custom 2"}.get(name, name.title())
+        lock = self._locks[name]
+        if not lock.acquire(blocking=False):
+            self.log.add(f"[WARN] {name} sync BUSY")
+            self._push_log(f"{name} BUSY")
+            return {"provider": name, "busy": True, "chats": 0, "ok": 0, "errors": 0,
+                    "partial": 0, "messages": 0, "skipped": 0}
+
+        self.set_sync_state(name, "running")
+        self.log.add(f"[{name.upper()}] batch start urls={urls}")
+        self.log.add(f"[INFO] {name.title()}: output dir → {self._output_dir}")
+        self._push_log(f"[INFO] {name.title()}: output dir → {self._output_dir}")
+        writer = ExportWriter(out_dir=self._output_dir)
+
+        result = {"provider": name, "chats": 0, "ok": 0, "errors": 0,
+                  "partial": 0, "messages": 0, "skipped": 0, "cancelled": False, "error": None}
+        try:
+            # ── Custom API generate path (no browser, prompt-driven) ──
+            if name.startswith("custom"):
+                slot = 1 if name == "custom1" else 2
+                if self._get_custom_mode(slot) == "web":
+                    pass  # fall through to browser pipeline below
+                else:
+                    return self._export_custom_generate(name, display, prompt, writer, result)
+
+            if urls:
+                seen = set()
+                chats = []
+                for u in urls:
+                    if isinstance(u, dict):
+                        key = u.get("url") or f"__idx{u.get('_index', '')}"
+                        if key not in seen:
+                            seen.add(key)
+                            chats.append(u)
+                    else:
+                        if u not in seen:
+                            seen.add(u)
+                            chats.append({"url": u})
+            elif name == "deepseek":
+                urls = self._discover_sidebar_urls()
+                chats = [{"url": u} for u in urls]
+            else:
+                page = self._page_for(name)
+                adapter = self._adapter_for(name, page)
+                if not adapter.healthcheck():
+                    raise RuntimeError(f"{name} page not available")
+                chats = adapter.list_chats()
+
+            if not chats:
+                raise RuntimeError(f"No {name} chat URLs found")
+
+            self.log.add(f"[{name.upper()}] batch: {len(chats)} chats")
+            result["chats"] = len(chats)
+            errors = 0
+            skipped = 0
+            partial = 0
+            messages_total = 0
+            results = []
+
+            for idx, chat in enumerate(chats):
+                self._check_cancel()
+
+                if not _check_cdp_alive():
+                    self._push_log(f"{name} ERR: CDP disconnected")
+                    break
+
+                title = chat.get("title", "")[:40] or chat.get("url", "")[:40]
+                self.log.add(f"[{name.upper()}] [{idx+1}/{len(chats)}] {title}")
+                self._push_log(f"{name} [{idx+1}/{len(chats)}] {title}")
+
+                page = self._page_for(name)
+                if page is None:
+                    self._push_log(f"{name} ERR: page lost")
+                    break
+
+                adapter = self._adapter_for(name, page)
+                if not adapter.healthcheck():
+                    self._push_log(f"{name} ERR: page not available")
+                    break
+
+                ok = adapter.open_chat(chat)
+                if not ok:
+                    errors += 1
+                    self._push_log(f"{name} [{idx+1}/{len(chats)}] ERR: not found")
+                    continue
+
+                model = adapter.extract_chat(chat)
+                if not model:
+                    errors += 1
+                    self._push_log(f"{name} [{idx+1}/{len(chats)}] ERR: no data")
+                    continue
+
+                ctx = capture_cdp_if_needed(name, page, self._push_log)
+                model, enrich_stats = Enricher.enrich(
+                    model, ctx.cdp_assets, ctx.runtime, ctx.anchor,
+                    log_func=self._push_log,
+                )
+                if enrich_stats.partial:
+                    partial += 1
+                if ctx.cdp_assets or ctx.runtime.blobs:
+                    writer.flush_media(model)
+                    self.log.add(f"[{name.upper()}] enrich: cdp={enrich_stats.cdp_strict + enrich_stats.cdp_temporal} runtime={enrich_stats.runtime} partial={enrich_stats.partial}")
+
+                path = writer.write(model, chat_order=idx)
+                if path:
+                    n = len(model.messages)
+                    if getattr(writer, "last_skipped", False):
+                        skipped += 1
+                        self.log.add(f"[SKIP] {name.title()} [{idx+1}/{len(chats)}] → {path} (unchanged)")
+                        self._push_log(f"[SKIP] {name.title()} [{idx+1}/{len(chats)}] (unchanged)")
+                    else:
+                        results.append({"ok": True, "path": str(path), "count": n})
+                        messages_total += n
+                        self.log.add(f"[OK] {name.title()} [{idx+1}/{len(chats)}] → {path}")
+                        self._push_log(f"[OK] {name.title()} [{idx+1}/{len(chats)}] → {path}")
+                else:
+                    errors += 1
+                    self._push_log(f"{name} [{idx+1}/{len(chats)}] ERR: write failed")
+
+            result["ok"] = len(results)
+            result["errors"] = errors
+            result["partial"] = partial
+            result["messages"] = messages_total
+            result["skipped"] = skipped + max(0, len(chats) - len(results) - errors - skipped)
+            self.set_sync_state(name, "done")
+            self.log.add(f"[INFO] {name} batch done: {messages_total} msgs from {len(results)}/{len(chats)} chats")
+            self._per_provider_summary(display, result)
+            try:
+                self.window.evaluate_js("copyLogContent()")
+            except Exception:
+                pass
+
+        except Cancelled:
+            self.set_sync_state(name, "failed")
+            result["cancelled"] = True
+            self.log.add(f"[INFO] {name} batch cancelled by user")
+            self._push_log(f"⏹ {name} sync cancelled")
+            self._push_summary(f"⏹ {display}: прервано — {result['ok']}/{result['chats']} чатов, {result['messages']} сообщений")
+        except Exception as e:
+            self.set_sync_state(name, "failed")
+            result["error"] = str(e)
+            self.log.add(f"[ERROR] {name}: {e}")
+            self._push_log(f"{name} ERR: {e}")
+            self._push_summary(f"✗ {display}: ошибка — {e}")
+        finally:
+            self._cancel_flag = False
+            self._cancel_version = 0
+            lock.release()
+        return result
+
+    def _per_provider_summary(self, display, result):
+        parts = [f"✓ {display}: завершено — {result['ok']} чатов, {result['messages']} сообщений, ошибок: {result['errors']}"]
+        if result.get("partial"):
+            parts.append(f"partial: {result['partial']}")
+        if result.get("skipped"):
+            parts.append(f"пропущено: {result['skipped']}")
+        self._push_summary(" · ".join(parts))
+
+    def _export_custom_generate(self, name, display, prompt, writer, result):
+        """Custom API path: prompt → API → ConversationModel → writer. Errors never create files."""
+        slot = 1 if name == "custom1" else 2
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            raise RuntimeError(f"{display}: пустой промпт")
+        self._push_log(f"custom{slot}: generate...")
+        adapter = self._adapter_for(name, None)
+        model = adapter.generate(prompt)
+        path = writer.write(model, chat_order=0)
+        if path:
+            n = len(model.messages)
+            result["chats"] = 1
+            result["ok"] = 1
+            result["messages"] = n
+            self.set_sync_state(name, "done")
+            self.log.add(f"[OK] {display} → {path}")
+            self._push_log(f"[OK] {display} → {path}")
+            self._push_summary(f"✓ {display}: готово — {n} сообщений → {path}")
+        else:
+            result["errors"] = 1
+            self.set_sync_state(name, "failed")
+            self._push_log(f"{name} ERR: write failed")
+            self._push_summary(f"✗ {display}: ошибка записи файла")
+        try:
+            self.window.evaluate_js("copyLogContent()")
+        except Exception:
+            pass
+        return result
+
+
+    # ── Qwen (CDP page in same browser as Gemini) ──
+
+
+    def _do_connect_qwen(self):
+        self.log.add("[INFO] Connecting to Qwen via CDP...")
+        if self.cdp.state != "running":
+            raise RuntimeError("CDP not running — launch Chrome first")
+
+        if self.qwen_page:
+            try:
+                self.qwen_page.close()
+            except Exception:
+                pass
+            self.qwen_page = None
+
+        try:
+            browser = self._cdp_browser()
+            page = browser.contexts[0].new_page()
+            page.goto("https://chat.qwen.ai/", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_load_state("domcontentloaded")
+
+            if not self._is_page_alive(page):
+                raise RuntimeError("Page not alive after navigation")
+
+            canonical = "https://chat.qwen.ai/"
+            current = page.url.rstrip("/")
+            if current != canonical.rstrip("/"):
+                self.log.add(f"[QWEN] redirect detected: {current} → restoring canonical")
+                with self._cdp_lock:
+                    page.goto(canonical, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_load_state("domcontentloaded")
+
+            self.qwen_page = page
+            self._qwen_session_epoch += 1
+            self._qwen_connected = True
+            try:
+                self.window.evaluate_js("setQwenConnected()")
+            except Exception:
+                pass
+            self.log.add("[INFO] Qwen connected via CDP")
+        except Exception as e:
+            self._qwen_connected = False
+            self.qwen_page = None
+            self.log.add(f"[ERROR] Qwen CDP attach failed: {e}")
+            raise
+
+    def ensure_qwen_alive(self):
+        if not self.qwen_page:
+            self._qwen_connected = False
+            return False
+        try:
+            self.qwen_page.url
+            return True
+        except Exception:
+            self.qwen_page = None
+            self._qwen_connected = False
+            self._push_log("Qwen page lost — reconnect required")
+            return False
+
+    def add_qwen_account(self):
+        if self._qwen_connect_lock:
+            return "BUSY"
+        if self._qwen_connected:
+            return "OK"
+        self._qwen_connect_lock = True
+        try:
+            self._connect_qwen_done.clear()
+            self._gw_queue.put(("connect_qwen", ""))
+            if not self._connect_qwen_done.wait(timeout=30):
+                raise RuntimeError("Qwen CDP connection timeout")
+            if not self._qwen_connected:
+                raise RuntimeError("Qwen CDP connection failed")
+            return "OK"
+        finally:
+            self._qwen_connect_lock = False
+
+    def sync_qwen(self, urls_json):
+        if not self._qwen_connected:
+            raise RuntimeError("Qwen not connected")
+        if not _check_cdp_alive():
+            raise RuntimeError("CDP not available")
+        if self._qwen_export_active:
+            raise RuntimeError("Qwen export already in progress")
+        urls = json.loads(urls_json)
+        self.log.add(f"[INFO] Enqueuing Qwen batch export ({len(urls)} urls)")
+        self._gw_queue.put(("export_provider", ("qwen", urls)))
+        return "STARTED"
+
+    def reconnect_qwen(self):
+        self.log.add("[INFO] Reconnecting Qwen...")
+        if self.qwen_page:
+            try:
+                self.qwen_page.close()
+            except Exception:
+                pass
+            self.qwen_page = None
+        self._qwen_connected = False
+        self.add_qwen_account()
+
+    # ── ChatGPT (CDP page in same browser as Gemini) ──
+
+    def _do_connect_chatgpt(self):
+        self.log.add("[INFO] Connecting to ChatGPT via CDP...")
+        if self.cdp.state != "running":
+            raise RuntimeError("CDP not running — launch Chrome first")
+
+        if self.chatgpt_page:
+            try:
+                self.chatgpt_page.close()
+            except Exception:
+                pass
+            self.chatgpt_page = None
+
+        try:
+            browser = self._cdp_browser()
+            page = browser.contexts[0].new_page()
+            page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_load_state("domcontentloaded")
+
+            if not self._is_page_alive(page):
+                raise RuntimeError("Page not alive after navigation")
+
+            self.chatgpt_page = page
+            self._chatgpt_session_epoch += 1
+            self._chatgpt_connected = True
+            try:
+                self.window.evaluate_js("setChatGPTConnected()")
+            except Exception:
+                pass
+            self.log.add("[INFO] ChatGPT connected via CDP")
+        except Exception as e:
+            self._chatgpt_connected = False
+            self.chatgpt_page = None
+            self.log.add(f"[ERROR] ChatGPT CDP attach failed: {e}")
+            raise
+
+    def ensure_chatgpt_alive(self):
+        if not self.chatgpt_page:
+            self._chatgpt_connected = False
+            return False
+        try:
+            self.chatgpt_page.url
+            return True
+        except Exception:
+            self.chatgpt_page = None
+            self._chatgpt_connected = False
+            self._push_log("ChatGPT page lost — reconnect required")
+            return False
+
+    def add_chatgpt_account(self):
+        if self._chatgpt_connect_lock:
+            return "BUSY"
+        if self._chatgpt_connected:
+            return "OK"
+        self._chatgpt_connect_lock = True
+        try:
+            self._connect_chatgpt_done.clear()
+            self._gw_queue.put(("connect_chatgpt", ""))
+            if not self._connect_chatgpt_done.wait(timeout=30):
+                raise RuntimeError("ChatGPT CDP connection timeout")
+            if not self._chatgpt_connected:
+                raise RuntimeError("ChatGPT CDP connection failed")
+            return "OK"
+        finally:
+            self._chatgpt_connect_lock = False
+
+    def sync_chatgpt(self, urls_json):
+        if not self._chatgpt_connected:
+            raise RuntimeError("ChatGPT not connected")
+        if not _check_cdp_alive():
+            raise RuntimeError("CDP not available")
+        if self._chatgpt_export_active:
+            raise RuntimeError("ChatGPT export already in progress")
+        urls = json.loads(urls_json)
+        self.log.add(f"[INFO] Enqueuing ChatGPT batch export ({len(urls)} urls)")
+        self._gw_queue.put(("export_provider", ("chatgpt", urls)))
+        return "STARTED"
+
+    def reconnect_chatgpt(self):
+        self.log.add("[INFO] Reconnecting ChatGPT...")
+        if self.chatgpt_page:
+            try:
+                self.chatgpt_page.close()
+            except Exception:
+                pass
+            self.chatgpt_page = None
+        self._chatgpt_connected = False
+        self.add_chatgpt_account()
+
+    # ── Claude (CDP page in same browser as Gemini) ──
+
+    def _do_connect_claude(self):
+        self.log.add("[INFO] Connecting to Claude via CDP...")
+        if self.cdp.state != "running":
+            raise RuntimeError("CDP not running — launch Chrome first")
+
+        if self.claude_page:
+            try:
+                self.claude_page.close()
+            except Exception:
+                pass
+            self.claude_page = None
+
+        try:
+            browser = self._cdp_browser()
+            page = browser.contexts[0].new_page()
+            page.goto("https://claude.ai/", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_load_state("domcontentloaded")
+
+            if not self._is_page_alive(page):
+                raise RuntimeError("Page not alive after navigation")
+
+            self.claude_page = page
+            self._claude_session_epoch += 1
+            self._claude_connected = True
+            try:
+                self.window.evaluate_js("setClaudeConnected()")
+            except Exception:
+                pass
+            self.log.add("[INFO] Claude connected via CDP")
+        except Exception as e:
+            self._claude_connected = False
+            self.claude_page = None
+            self.log.add(f"[ERROR] Claude CDP attach failed: {e}")
+            raise
+
+    def ensure_claude_alive(self):
+        if not self.claude_page:
+            self._claude_connected = False
+            return False
+        try:
+            self.claude_page.url
+            return True
+        except Exception:
+            self.claude_page = None
+            self._claude_connected = False
+            self._push_log("Claude page lost — reconnect required")
+            return False
+
+    def add_claude_account(self):
+        if self._claude_connect_lock:
+            return "BUSY"
+        if self._claude_connected:
+            return "OK"
+        self._claude_connect_lock = True
+        try:
+            self._connect_claude_done.clear()
+            self._gw_queue.put(("connect_claude", ""))
+            if not self._connect_claude_done.wait(timeout=30):
+                raise RuntimeError("Claude CDP connection timeout")
+            if not self._claude_connected:
+                raise RuntimeError("Claude CDP connection failed")
+            return "OK"
+        finally:
+            self._claude_connect_lock = False
+
+    def sync_claude(self, urls_json):
+        if not self._claude_connected:
+            raise RuntimeError("Claude not connected")
+        if not _check_cdp_alive():
+            raise RuntimeError("CDP not available")
+        if self._claude_export_active:
+            raise RuntimeError("Claude export already in progress")
+        urls = json.loads(urls_json)
+        self.log.add(f"[INFO] Enqueuing Claude batch export ({len(urls)} urls)")
+        self._gw_queue.put(("export_provider", ("claude", urls)))
+        return "STARTED"
+
+    def reconnect_claude(self):
+        self.log.add("[INFO] Reconnecting Claude...")
+        if self.claude_page:
+            try:
+                self.claude_page.close()
+            except Exception:
+                pass
+            self.claude_page = None
+        self._claude_connected = False
+        self.add_claude_account()
+
+    # ── URL watcher (runs in _pw_worker idle loop) ──
+
+    def _watch_url(self):
+        if not self.pw:
+            return
+        try:
+            mp = self._main_page()
+            if not mp:
+                return
+            url = mp.evaluate("() => location.href")
+            if url == self._last_watched_url:
+                return
+            self._last_watched_url = url
+            self._handle_url(url)
+        except Exception:
+            pass
+
+    def _handle_url(self, url):
+        if url in self._seen_urls:
+            return
+        if re.match(r"https://chat\.deepseek\.com/a/chat/s/[a-f0-9-]+", url):
+            self._seen_urls.add(url)
+            try:
+                self.window.evaluate_js(f"addChatUrl({json.dumps(url)})")
+            except Exception:
+                pass
+            self.log.add(f"[INFO] Chat URL captured: {url[:60]}...")
+
+    # ── Hybrid discovery (runs in _pw_worker via _export_batch) ──
+
+    def _discover_sidebar_urls(self):
+        mp = self._main_page()
+        if not mp:
+            return []
+        try:
+            urls = mp.evaluate("""
+                () => [...new Set(
+                    [...document.querySelectorAll('a[href*="/chat/s/"]')]
+                        .map(a => 'https://chat.deepseek.com' + a.getAttribute('href'))
+                        .filter(Boolean)
+                )]
+            """)
+            urls = urls or []
+            self.log.add(f"[INFO] Sidebar discovery: {len(urls)} URLs")
+            for u in urls:
+                self.log.add(f"[DEBUG]   {u[:60]}")
+            return urls
+        except Exception as e:
+            self.log.add(f"[WARN] Sidebar discovery failed: {e}")
+            return []
+
+    def _discover_all_chat_urls(self):
+        mp = self._main_page()
+        if not mp:
+            return []
+        try:
+            all_urls = set()
+            seen_hashes = set()
+            stable = 0
+            MAX_STABLE = 5
+            MAX_ITER = 50
+            SCROLL_STEP = 300
+
+            for i in range(MAX_ITER):
+                urls = mp.evaluate("""
+                    () => [...new Set(
+                        [...document.querySelectorAll('a[href*="/chat/s/"]')]
+                            .map(a => 'https://chat.deepseek.com' + a.getAttribute('href'))
+                            .filter(Boolean)
+                    )]
+                """)
+                current = set(urls or [])
+                if current.issubset(seen_hashes):
+                    stable += 1
+                    if stable >= MAX_STABLE:
+                        break
+                else:
+                    stable = 0
+                    seen_hashes |= current
+                    all_urls |= current
+
+                mp.evaluate("""
+                    () => {
+                        const c = document.querySelector('.ds-virtual-list, [class*="sidebar"]');
+                        if (c) c.scrollTop += arguments[0];
+                    }
+                """, SCROLL_STEP)
+                time_module.sleep(0.3)
+
+            result = list(all_urls)
+            self.log.add(f"[INFO] Full sidebar discovery: {len(result)} URLs (after {i+1} scrolls)")
+            for u in result:
+                self.log.add(f"[DEBUG]   {u[:60]}")
+            return result
+        except Exception as e:
+            self.log.add(f"[WARN] Full sidebar discovery failed: {e}")
+            return []
+
+    # ── Public API (called from API class, runs on bridge threads) ──
+
+    def add_account(self, url):
+        if self._auto_reconnecting:
+            return "BUSY"
+        self._connect_done.clear()
+        self._connect_error = None
+        self._pw_queue.put(("connect", url))
+        if not self._connect_done.wait(timeout=MAX_LOGIN_HARD):
+            raise RuntimeError(f"Login timeout ({MAX_LOGIN_HARD // 60} min)")
+        if self._connect_error:
+            raise RuntimeError(self._connect_error)
+        return "OK"
+
+    def sync_provider(self, urls_json):
+        if not self.pw:
+            self.log.add("[ERROR] No account connected")
+            return "ERR: no account"
+
+        if self._export_active:
+            self.log.add("[WARN] Export already in progress")
+            return "ERR: export in progress"
+
+        urls = json.loads(urls_json)
+        self.log.add(f"[INFO] Enqueuing batch export ({len(urls)} urls from UI)...")
+        self._pw_queue.put(("export_provider", ("deepseek", urls)))
+        return "STARTED"
+
+    def reconnect(self):
+        self._connect_done.clear()
+        self._connect_error = None
+        self._pw_queue.put(("reconnect", None))
+        if not self._connect_done.wait(timeout=MAX_LOGIN_HARD):
+            raise RuntimeError(f"Reconnect timeout ({MAX_LOGIN_HARD // 60} min)")
+        if self._connect_error:
+            raise RuntimeError(self._connect_error)
+        return "OK"
+
+    # ── Gemini public API ──
+
+    def add_gemini_account(self, url):
+        if self._auto_reconnecting:
+            return "BUSY"
+        if self._gemini_connect_lock:
+            return "BUSY"
+        if self._gemini_connect_state == "connected":
+            try:
+                if self.gemini_page and self.gemini_page.url:
+                    self.log.add("[INFO] Gemini already connected")
+                    return "OK"
+            except Exception:
+                self._gemini_connect_state = "idle"
+        self._gemini_connect_lock = True
+        try:
+            self._connect_gemini_done.clear()
+            self._gw_queue.put(("connect_gemini", url))
+            if not self._connect_gemini_done.wait(timeout=30):
+                raise RuntimeError("Gemini CDP connection timeout")
+            if not self.gemini_page or self._gemini_connect_state != "connected":
+                raise RuntimeError("Gemini not actually connected")
+            self._gemini_connect_state = "connected"
+            return "OK"
+        finally:
+            self._gemini_connect_lock = False
+
+    def sync_gemini(self, urls_json):
+        if not self.gemini_page:
+            self.log.add("[ERROR] Gemini not connected")
+            raise RuntimeError("Gemini not connected")
+        if self._gemini_export_active:
+            self.log.add("[WARN] Gemini export already in progress")
+            raise RuntimeError("Gemini export already in progress")
+        urls = json.loads(urls_json)
+        self.log.add(f"[INFO] Enqueuing Gemini batch export ({len(urls)} urls)")
+        self._gw_queue.put(("export_provider", ("gemini", urls)))
+        return "STARTED"
+
+    def reconnect_gemini(self):
+        if self._gemini_connect_lock:
+            return "BUSY"
+        self._gemini_connect_lock = True
+        self._gemini_connect_state = "idle"
+        try:
+            self.log.add("[INFO] Reconnecting Gemini...")
+            self.add_gemina_account("cdp")
+        finally:
+            self._gemini_connect_lock = False
+
+    def _close_cdp_browser(self):
+        self.log.add("[CDP] Closing browser session...")
+        self._close_pw_done.clear()
+        self._close_gw_done.clear()
+        try:
+            self._pw_queue.put(("close_cdp", "pw"))
+        except Exception:
+            self._close_pw_done.set()
+        try:
+            self._gw_queue.put(("close_cdp", "gw"))
+        except Exception:
+            self._close_gw_done.set()
+        self._close_pw_done.wait(timeout=20)
+        self._close_gw_done.wait(timeout=20)
+        self.cdp.stop()
+        self._gw_browser = None
+        self.gemini_page = None
+        self.qwen_page = None
+        self.chatgpt_page = None
+        self.claude_page = None
+        self.custom1_page = None
+        self.custom2_page = None
+        self.pw = None
+        self._gemini_connect_state = "idle"
+        self._qwen_connected = False
+        self._chatgpt_connected = False
+        self._claude_connected = False
+        self._custom1_connected = False
+        self._custom2_connected = False
+        self._seen_urls.clear()
+        self._last_watched_url = ""
+        try:
+            self.window.evaluate_js("""
+                requestAnimationFrame(() => {
+                    document.querySelectorAll('.pv-dot').forEach(d => d.className = 'pv-dot dot-off');
+                    ['deepseek','gemini','qwen','chatgpt','claude'].forEach(p => {
+                        const b = document.querySelector('.'+p+' .badge');
+                        if(b) { b.textContent='не подключено'; b.className='badge'; }
+                    });
+                    document.querySelectorAll('[id$="Urls"]').forEach(e => e.classList.add('hidden'));
+                    document.querySelectorAll('[id$="Account"]').forEach(e => e.classList.add('hidden'));
+                    if(typeof resetAllTabStates === 'function') resetAllTabStates();
+                });
+            """)
+        except Exception:
+            pass
+        self.log.add("[CDP] Browser closed")
+
+    # ── Custom API (generate & save) ──
+
+    def get_custom_config(self, slot):
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"invalid custom slot: {slot}")
+        # api_key never leaves the backend — only has_api_key flag.
+        return sanitize_config_for_display(load_custom_config(self._config_path, slot))
+
+    def set_custom_config(self, slot, config_json):
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"invalid custom slot: {slot}")
+        new_cfg = json.loads(config_json)
+        old = load_custom_config(self._config_path, slot)
+        key = str(new_cfg.get("api_key", "") or "").strip()
+        if key == KEEP_KEY:
+            new_cfg["api_key"] = old.get("api_key", "")
+        save_custom_config(self._config_path, slot, new_cfg)
+        # No api_key in logs.
+        self.log.add(f"[INFO] Custom{slot} config saved: endpoint={new_cfg.get('endpoint', '')}, model={new_cfg.get('model', '')}")
+        return "OK"
+
+    def test_custom(self, slot, config_json):
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"invalid custom slot: {slot}")
+        cfg = json.loads(config_json)
+        adapter = CustomAdapter(slot, cfg, self._push_log)
+        return adapter.test_connection()
+
+    def sync_custom(self, slot, prompt):
+        name = f"custom{int(slot)}"
+        cfg = load_custom_config(self._config_path, int(slot))
+        if not (str(cfg.get("endpoint", "")).strip() and str(cfg.get("model", "")).strip()):
+            raise RuntimeError(f"Custom {slot}: заполните Endpoint и Model, затем сохраните настройки")
+        if not prompt or not str(prompt).strip():
+            raise RuntimeError(f"Custom {slot}: пустой промпт")
+        if not self._locks[name].acquire(blocking=False):
+            raise RuntimeError(f"Custom {slot}: генерация уже выполняется")
+        self._locks[name].release()
+        self.log.add(f"[INFO] Enqueuing Custom{slot} generation")
+        self._gw_queue.put(("export_custom", (name, str(prompt))))
+        return "STARTED"
+
+    # ── Custom Web (browser-based) ──
+
+    def _get_custom_mode(self, slot):
+        cfg = load_custom_config(self._config_path, slot)
+        return str(cfg.get("mode", "api")).strip().lower() or "api"
+
+    def bind_preset(self, slot, preset_id):
+        """Bind a Custom slot to a preset id (TICKET-002-D, in-memory only)."""
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"Unknown Custom slot: {slot}")
+        binding = getattr(self, "_preset_binding", None)
+        if binding is None:
+            binding = self._preset_binding = {}
+        if preset_id:
+            binding[slot] = str(preset_id)
+        else:
+            binding.pop(slot, None)
+
+    def _preset_navigation(self, slot):
+        """Navigation mode for a slot. Defaults to "goto" (TICKET-002-D)."""
+        from core.preset_engine import resolve_navigation
+
+        preset_id = getattr(self, "_preset_binding", {}).get(int(slot))
+        if not preset_id:
+            return "goto"
+        catalog = getattr(self, "_preset_catalog", [])
+        return resolve_navigation(catalog, preset_id, "goto")
+
+    def _preset_catalog_path(self):
+        """Catalog file path next to config.json (TICKET-002-D)."""
+        from core.preset_engine import resolve_catalog_path
+
+        return resolve_catalog_path(self._storage_dir)
+
+    def _do_connect_custom(self, slot, url):
+        # TICKET-002-F: reconnect only swaps page/flag. Binding, selectors,
+        # navigation and saved config are never touched here.
+        page_attr = f"custom{slot}_page"
+        setattr(self, f"_custom{slot}_connected", False)
+        old_page = getattr(self, page_attr, None)
+        if old_page:
+            try:
+                old_page.close()
+            except Exception:
+                pass
+            setattr(self, page_attr, None)
+
+        browser = self._cdp_browser()
+        page = browser.contexts[0].new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        page.wait_for_load_state("domcontentloaded")
+
+        if not self._is_page_alive(page):
+            raise RuntimeError("Page not alive")
+
+        setattr(self, page_attr, page)
+        setattr(self, f"_custom{slot}_connected", True)
+        self.log.add(f"[INFO] Custom{slot} connected to {url}")
+
+    def _do_disconnect_custom(self, slot):
+        page_attr = f"custom{slot}_page"
+        page = getattr(self, page_attr, None)
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+        setattr(self, page_attr, None)
+        setattr(self, f"_custom{slot}_connected", False)
+        self.log.add(f"[INFO] Custom{slot} disconnected")
+
+    def _do_scan_custom(self, slot):
+        page_attr = f"custom{slot}_page"
+        page = getattr(self, page_attr, None)
+        if not page:
+            return []
+        cfg = load_custom_config(self._config_path, slot)
+        from adapters.custom_web import CustomWebAdapter
+        adapter = CustomWebAdapter(page, cfg, self._push_log)
+        return adapter.list_chats()
+
+    def connect_custom_web(self, slot, url):
+        # TICKET-002-F URL override contract: url is a starting value only.
+        # Changing it never resets selectors, slot->preset binding, or
+        # navigation; cfg.url vs page.url may diverge — that is normal.
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"Unknown Custom slot: {slot}")
+        name = f"custom{slot}"
+        if not self._locks[name].acquire(blocking=False):
+            raise RuntimeError(f"Custom{slot}: BUSY (sync/export in progress)")
+        try:
+            self._sync_results.pop(f"connect_custom{slot}_error", None)
+            ev = threading.Event()
+            self._sync_done_events[f"connect_custom{slot}"] = ev
+            self._gw_queue.put((f"connect_custom{slot}", url))
+            timed_out = not ev.wait(timeout=30)
+            err = self._sync_results.pop(f"connect_custom{slot}_error", None)
+            if timed_out:
+                self._push_log(f"custom{slot}: connect timeout (30s)")
+                raise RuntimeError(f"Custom{slot}: connect timeout")
+            if err:
+                raise RuntimeError(err)
+            page = getattr(self, f"custom{slot}_page", None)
+            if not page:
+                raise RuntimeError(f"Custom{slot}: page not created")
+            return "OK"
+        finally:
+            self._locks[name].release()
+
+    def disconnect_custom_web(self, slot):
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"Unknown Custom slot: {slot}")
+        name = f"custom{slot}"
+        if not self._locks[name].acquire(blocking=False):
+            raise RuntimeError(f"Custom{slot}: BUSY (sync/export in progress)")
+        try:
+            ev = threading.Event()
+            self._sync_done_events[f"disconnect_custom{slot}"] = ev
+            self._gw_queue.put((f"disconnect_custom{slot}", ""))
+            ev.wait(timeout=10)
+            return "OK"
+        finally:
+            self._locks[name].release()
+
+    def scan_custom_web(self, slot):
+        slot = int(slot)
+        if not getattr(self, f"_custom{slot}_connected", False):
+            return []
+        ev = threading.Event()
+        self._sync_done_events[f"scan_custom{slot}"] = ev
+        self._gw_queue.put((f"scan_custom{slot}", ""))
+        ev.wait(timeout=15)
+        err = self._sync_results.pop(f"scan_custom{slot}_error", None)
+        if err:
+            self._push_log(f"custom{slot} scan error: {err}")
+            return []
+        return self._sync_results.pop(f"scan_custom{slot}", [])
+
+    def check_custom_web(self, slot, preset_id=None):
+        """Structured applicability check (TICKET-002-G). Never raises."""
+        slot = int(slot)
+        if slot not in (1, 2):
+            raise RuntimeError(f"Unknown Custom slot: {slot}")
+        preset_id = str(preset_id or "")
+        if preset_id:
+            _, _, _, _, invalid = self._resolve_check_config(slot, preset_id)
+            if invalid:
+                return {
+                    "preset_id": preset_id, "page_url": "",
+                    "chat_list_N": 0, "messages_N": 0, "user_N": 0,
+                    "assistant_N": 0, "scroll": "empty",
+                    "verdict": "Incompatible", "reason": "format_invalid",
+                }
+        ev = threading.Event()
+        self._sync_done_events[f"check_custom{slot}"] = ev
+        self._gw_queue.put((f"check_custom{slot}", {"preset_id": preset_id}))
+        timed_out = not ev.wait(timeout=15)
+        res = self._sync_results.pop(f"check_custom{slot}", None)
+        if timed_out or not isinstance(res, dict):
+            return {
+                "preset_id": preset_id, "page_url": "",
+                "chat_list_N": 0, "messages_N": 0, "user_N": 0,
+                "assistant_N": 0, "scroll": "unknown",
+                "verdict": "Incompatible", "reason": "timeout",
+            }
+        self._push_log(
+            f"custom{slot}: check {res.get('preset_id') or 'manual'} → "
+            f"{res.get('verdict')} ({res.get('reason')})"
+        )
+        return res
+
+    def _resolve_check_config(self, slot, preset_id):
+        """Config source for a diagnostics check (TICKET-002-G).
+
+        Returns (web_cfg, default_url, stype, effective_id, invalid).
+        Unknown preset_id falls back to the slot's manual fields instead
+        of format_invalid; invalid=True only for a found-but-broken
+        preset (defensive: catalog holds valid presets only).
+        """
+        if preset_id:
+            catalog = getattr(self, "_preset_catalog", [])
+            preset = next(
+                (p for p in catalog if isinstance(p, dict) and p.get("id") == preset_id),
+                None,
+            )
+            if preset is not None:
+                from core.preset_engine import validate_preset
+
+                if not validate_preset(preset)[0]:
+                    return None, "", "selector", preset_id, True
+                web_cfg = _preset_to_web_config(preset)
+                default_url = preset.get("default_url", "") or ""
+                stype = str(preset.get("strategy", {}).get("type", "selector"))
+                return web_cfg, default_url, stype, preset_id, False
+        cfg = load_custom_config(self._config_path, slot)
+        web_cfg = {k: cfg.get(k, "") for k in (
+            "mode", "url", "chat_list_selector", "title_selector",
+            "message_selector", "user_message_selector",
+            "assistant_message_selector", "scroll_container_selector",
+            "wait_after_click_ms", "list_chats_js", "extract_messages_js",
+        )}
+        default_url = cfg.get("url", "") or ""
+        stype = "script" if str(web_cfg.get("list_chats_js") or "").strip() else "selector"
+        return web_cfg, default_url, stype, "", False
+
+    def _do_check_custom(self, slot, arg=None):
+        if isinstance(arg, dict):
+            preset_id = str(arg.get("preset_id") or "")
+        else:
+            preset_id = str(arg or "")
+        page = getattr(self, f"custom{slot}_page", None)
+        page_url = ""
+        try:
+            page_url = (page.url if page else "") or ""
+        except Exception:
+            pass
+        if not page:
+            return {
+                "preset_id": preset_id, "page_url": page_url,
+                "chat_list_N": 0, "messages_N": 0, "user_N": 0,
+                "assistant_N": 0, "scroll": "empty",
+                "verdict": "Incompatible", "reason": "page_dead",
+            }
+        default_url = ""
+        web_cfg, default_url, stype, preset_id, invalid = self._resolve_check_config(slot, preset_id)
+        if invalid:
+            return {
+                "preset_id": preset_id, "page_url": page_url,
+                "chat_list_N": 0, "messages_N": 0, "user_N": 0,
+                "assistant_N": 0, "scroll": "empty",
+                "verdict": "Incompatible", "reason": "format_invalid",
+            }
+        from adapters.custom_web import CustomWebAdapter
+
+        adapter = CustomWebAdapter(page, web_cfg, self._push_log)
+        try:
+            chats = adapter.list_chats() or []
+        except Exception:
+            chats = []
+        try:
+            counts = page.evaluate(_DIAG_COUNTS_JS, {
+                "chatSel": web_cfg.get("chat_list_selector", ""),
+                "msgSel": web_cfg.get("message_selector", ""),
+                "userSel": web_cfg.get("user_message_selector", ""),
+                "asstSel": web_cfg.get("assistant_message_selector", ""),
+            }) or {}
+        except Exception:
+            counts = {}
+        messages_n = int(counts.get("messages", 0) or 0)
+        user_n = int(counts.get("user", 0) or 0)
+        asst_n = int(counts.get("assistant", 0) or 0)
+        verdict, reason = _diagnose_verdict(
+            len(chats), messages_n, user_n, asst_n, page_url, default_url)
+        if stype == "script":
+            scroll = "unknown"
+        else:
+            scroll = "ok" if chats else "empty"
+        return {
+            "preset_id": preset_id, "page_url": page_url,
+            "chat_list_N": len(chats), "messages_N": messages_n,
+            "user_N": user_n, "assistant_N": asst_n,
+            "scroll": scroll, "verdict": verdict, "reason": reason,
+        }
+
+    def _run_check_cmd(self, cmd, slot, arg):
+        try:
+            self._sync_results[cmd] = self._do_check_custom(slot, arg)
+        except Exception as e:
+            self._sync_results[cmd] = {
+                "preset_id": "", "page_url": "",
+                "chat_list_N": 0, "messages_N": 0, "user_N": 0,
+                "assistant_N": 0, "scroll": "unknown",
+                "verdict": "Incompatible", "reason": "timeout",
+            }
+            self._sync_results[cmd + "_error"] = str(e)
+        finally:
+            ev = self._sync_done_events.pop(cmd, None)
+            if ev:
+                ev.set()
+
+    def _is_provider_connected(self, name):
+        if name in ("custom1", "custom2"):
+            slot = 1 if name == "custom1" else 2
+            mode = self._get_custom_mode(slot)
+            if mode == "web":
+                return getattr(self, f"_custom{slot}_connected", False)
+            return custom_config_ready(self._config_path, slot)
+        return {
+            "deepseek": self.pw is not None,
+            "gemini": self._gemini_connect_state == "connected",
+            "qwen": self._qwen_connected,
+            "chatgpt": self._chatgpt_connected,
+            "claude": self._claude_connected,
+        }.get(name, False)
+
+    def set_sync_state(self, provider, state):
+        self._sync_state[provider] = state
+        try:
+            self.window.evaluate_js(f"setProviderSync('{provider}', '{state}')")
+        except Exception:
+            pass
+
+    def _do_sync_all(self):
+        try:
+            self.window.evaluate_js("setSyncRunning(true)")
+        except Exception:
+            pass
+        self.log.add("[INFO] Sync All — ChatGPT → Gemini → Claude → Qwen → DeepSeek")
+        order = ["chatgpt", "gemini", "claude", "qwen", "deepseek"]
+        for slot in (1, 2):
+            name = f"custom{slot}"
+            if self._is_provider_connected(name) and self._get_custom_mode(slot) == "web":
+                order.append(name)
+        events = {}
+        for name in order:
+            if not self._is_provider_connected(name):
+                continue
+            ev = threading.Event()
+            self._sync_done_events[name] = ev
+            events[name] = ev
+            self.log.add(f"[SYNC] Старт {name}...")
+            try:
+                q = self._pw_queue if name == "deepseek" else self._gw_queue
+                q.put(("export_provider", (name, [])))
+            except Exception as e:
+                self._sync_done_events.pop(name, None)
+                self._sync_results[name] = {"provider": name, "error": str(e)}
+                self.set_sync_state(name, "failed")
+                ev.set()
+
+        for name, ev in events.items():
+            ev.wait(timeout=600)
+            if not ev.is_set():
+                self._sync_results.setdefault(name, {"provider": name, "error": "timeout"})
+
+        results = [self._sync_results.get(name, {"provider": name}) for name in events]
+        self._emit_sync_all_summary(results)
+        self.log.add("[INFO] Sync All — выполнено")
+        try:
+            self.window.evaluate_js("setSyncRunning(false)")
+        except Exception:
+            pass
+
+    def _emit_sync_all_summary(self, results):
+        providers = len(results)
+        chats = sum(r.get("chats", 0) for r in results)
+        messages = sum(r.get("messages", 0) for r in results)
+        errors = sum(r.get("errors", 0) for r in results)
+        partial = sum(r.get("partial", 0) for r in results)
+        skipped = sum(r.get("skipped", 0) for r in results)
+        if any(r.get("cancelled") for r in results):
+            msg = f"⏹ Прервано: {providers} провайдеров · {chats} чатов · {messages} сообщений"
+        else:
+            msg = f"Готово: {providers} провайдеров · {chats} чатов · {messages} сообщений · ошибок: {errors}"
+            extra = []
+            if partial:
+                extra.append(f"partial: {partial}")
+            if skipped:
+                extra.append(f"пропущено: {skipped}")
+            if extra:
+                msg += " · " + " · ".join(extra)
+        self._push_summary(msg)
+
+    def launch_chrome_cdp(self):
+        prev = self._cdp_start_thread
+        if prev is not None and prev.is_alive():
+            self.log.add("[CDP] startup already in progress")
+            return "OK"
+
+        def _worker():
+            try:
+                if self.cdp.healthcheck():
+                    self.log.add("[INFO] CDP alive — force restart Chrome session")
+                    self._close_cdp_browser()
+                    time_module.sleep(2)
+                self.cdp.start()
+            except Exception as e:
+                self.log.add(f"[CDP] FAILED: {e}")
+
+        self._cdp_start_thread = threading.Thread(target=_worker, daemon=True)
+        self._cdp_start_thread.start()
+        return "OK"
+
+    # ── Session restore on startup ──
+
+    def _try_restore_session(self):
+        time_module.sleep(3)
+        self._auto_reconnecting = True
+        try:
+            self.log.add("[INFO] Auto-restoring DeepSeek session...")
+            self.window.evaluate_js("autoRestore()")
+        finally:
+            self._auto_reconnecting = False
+
+    # ── UI logging / snapshots ──
+
+    def log_ui_event(self, event):
+        if not self.ui_log_path:
+            return
+        ts = datetime.now().isoformat()
+        line = f"[{ts}] EVENT [source=ui] {event}"
+        try:
+            with open(self.ui_log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+    def save_ui_snapshot(self, content):
+        if self.ui_snapshot_path:
+            try:
+                with open(self.ui_snapshot_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n===== SNAPSHOT START [{datetime.now().isoformat()}] =====\n")
+                    f.write(content + "\n")
+                    f.write(f"===== SNAPSHOT END [{datetime.now().isoformat()}] =====\n")
+                self.log.add(f"[INFO] snapshot → {self.ui_snapshot_path}")
+                self._push_log(f"snapshot → {self.ui_snapshot_path}")
+            except OSError:
+                pass
+
+    def _write_model(self, model, writer, label, chat_order):
+        path = writer.write(model, chat_order=chat_order)
+        if not path:
+            self._push_log(f"{label} ERR: write failed")
+            return None
+        n = len(model.messages)
+        source = model.metadata.get("source", "?")
+        self.log.add(f"[SUCCESS] {label} {n} msgs ({source}) → {path}")
+        self._push_log(f"{label} OK: {n} msgs — {model.title} → {path}")
+        return {"ok": True, "path": str(path), "count": n}
+
+    # ── Output directory ──
+
+    def _default_output_dir(self):
+        return os.path.join(self._storage_dir, "raw")
+
+    def _load_output_dir(self):
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            val = data.get("output_dir")
+            if val and isinstance(val, str):
+                return val
+        except Exception:
+            pass
+        return None
+
+    def _save_output_dir(self, path):
+        tmp = self._config_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"output_dir": path}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self._config_path)
+
+    def get_output_dir(self):
+        return self._output_dir
+
+    def set_output_dir(self, path):
+        os.makedirs(path, exist_ok=True)
+        self._output_dir = path
+        try:
+            self._save_output_dir(path)
+        except Exception as e:
+            self.log.add(f"[WARN] cannot save config: {e}")
+        self.log.add(f"[INFO] Output directory: {path}")
+        self._push_log(f"[INFO] Output directory: {path}")
+        return path
+
+    def open_output_dir(self):
+        os.makedirs(self._output_dir, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(self._output_dir)
+        return self._output_dir
+
+    def get_version(self):
+        return {"current": APP_VERSION}
+
+    def check_update(self):
+        current = APP_VERSION
+        rel = _fetch_latest_release()
+        if not rel:
+            return {"available": False, "current": current}
+        if _version_tuple(rel["tag"]) > _version_tuple(current):
+            return {
+                "available": True,
+                "current": current,
+                "latest": rel["tag"],
+                "url": rel["url"],
+            }
+        return {"available": False, "current": current}
+
+    def _push_log(self, msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        try:
+            self.window.evaluate_js(f"pushLog({json.dumps(f'[{ts}] {msg}')})")
+        except Exception:
+            pass
+
+    def _push_summary(self, msg):
+        self.log.add(f"[SUMMARY] {msg}")
+        try:
+            self.window.evaluate_js(f"pushSummary({json.dumps(msg)})")
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    bundled_browsers = os.path.join(exe_dir, "ms-playwright")
+    if os.path.isdir(bundled_browsers):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
+    _install_stderr_logging()
+    app = App()
+    icon_path = os.path.join(getattr(sys, "_MEIPASS", exe_dir), "ui", "icon.ico")
+    if not os.path.isfile(icon_path):
+        icon_path = "ui/icon.ico"
+    webview.start(debug=False, icon=icon_path)

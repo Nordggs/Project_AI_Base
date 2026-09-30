@@ -1,0 +1,46 @@
+[
+  {
+    "id": "grok",
+    "name": "Grok",
+    "description": "Preset verified live on grok.com (PoC 002-C: chat list 5 via a[href*='/c/'], 4 messages, roles ok). Navigation click: goto leaves the Grok SPA chat empty (live run 2026-09-29: 3x ERR no data), opening via sidebar click (N2).",
+    "default_url": "https://grok.com/",
+    "version": 1,
+    "checked_at": "2026-09-25",
+    "strategy": {
+      "type": "selector",
+      "navigation": "click",
+      "wait_after_click_ms": 2000,
+      "selectors": {
+        "chat_list_selector": "a[href*='/c/']",
+        "title_selector": "",
+        "message_selector": ".message-bubble, .response-content-markdown",
+        "user_message_selector": ".message-bubble",
+        "assistant_message_selector": ".response-content-markdown",
+        "scroll_container_selector": "main"
+      },
+      "scripts": {"list_chats_js": "", "extract_messages_js": ""}
+    }
+  },
+  {
+    "id": "userscript-generic",
+    "name": "Generic (userscript triples)",
+    "description": "Message triple verified live on grok.com (5 chats, 2 msgs, roles ok) and chat.z.ai (9 chats, 3 msgs, roles ok) via PoC 002-C. Chat list selector verified on grok.com; on Z.ai the history-button list applies (see 002-C matrix).",
+    "default_url": "https://grok.com/",
+    "version": 1,
+    "checked_at": "2026-09-25",
+    "strategy": {
+      "type": "selector",
+      "navigation": "goto",
+      "wait_after_click_ms": 2000,
+      "selectors": {
+        "chat_list_selector": "a[href*='/c/']",
+        "title_selector": "",
+        "message_selector": "[class*=\"message\"], [class*=\"chat-message\"]",
+        "user_message_selector": "[class*=\"user\"]",
+        "assistant_message_selector": "[class*=\"assistant\"], [class*=\"ai\"]",
+        "scroll_container_selector": "main"
+      },
+      "scripts": {"list_chats_js": "", "extract_messages_js": ""}
+    }
+  }
+]

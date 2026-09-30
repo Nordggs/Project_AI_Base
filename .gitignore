@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Browser session data
+.cookies/
+
+# Export results
+raw/
+
+# Logs
+logs/
+
+# Local runtime settings (dev runs)
+config.json
+custom_presets.json
+
+# Release backups
+release/
+
+# Internal analysis
+analysis/
+inbox/
+SOURCE/
+
+# Internal agent docs / session plans (not part of the product)
+AGENTS.md
+.opencode/plans/
+.anchored_summary.md
+
+# Experimental raw responses
+raw_responses/
+
+# Local dev helpers
+run-main.bat
+
+# Unpacked downloads / test extractions
+AIChatExporter-Portable-*/
+
+# Build artifacts
+build-venv/
+build/
+dist/
+releases/
+*.zip
+*.iso
+
+# Pre-commit safety (AUDIT TICKET-002-A): never commit personal data or stale tests
+Contacts/
+tests/to_chk/
+
+# Obsidian vault / personal workspace data (AUDIT 002-FINAL): never commit.
+# Criterion "clean tree" rests on selective staging, not git add -A.
+.obsidian/
+BMO/
+ObsServ/
+_context/
+config.yml
+debug_out.txt
