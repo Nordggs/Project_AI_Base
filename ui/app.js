@@ -415,7 +415,7 @@ function setSyncRunning(running) {
 
 function setProviderSync(provider, status) {
   var map = { 'gemini':'Gemini', 'qwen':'Qwen', 'chatgpt':'ChatGPT', 'claude':'Claude', 'deepseek':'DeepSeek',
-              'custom1':'Custom1', 'custom2':'Custom2' };
+              'custom1':'Custom1', 'custom2':'Custom2', 'profiler':'Profiler' };
   var dot = document.getElementById('pv' + map[provider]);
   if (!dot) return;
   var cls = { 'idle':'dot-off', 'running':'dot-syncing', 'done':'dot-on', 'failed':'dot-failed' };
@@ -628,6 +628,189 @@ function saveCustom(slot) {
   }, function(err) {
     log("custom" + slot + ": сохранение не удалось: " + err);
     throw err;
+  });
+}
+
+// ── Provider Profiler (TICKET-003) ──
+
+var _profPollTimer = null;
+var _profLastResults = null;
+
+function openProfiler() {
+  document.getElementById("profilerModal").classList.remove("hidden");
+  document.getElementById("profError").classList.add("hidden");
+  document.getElementById("profResults").classList.add("hidden");
+  document.getElementById("profPhase").textContent = "";
+  _profLastResults = null;
+  refreshProfilerResume();
+}
+
+function closeProfiler() {
+  document.getElementById("profilerModal").classList.add("hidden");
+  _profStopPoll();
+}
+
+function _profStopPoll() {
+  if (_profPollTimer) { clearInterval(_profPollTimer); _profPollTimer = null; }
+  var cancelBtn = document.getElementById("profCancelBtn");
+  if (cancelBtn) cancelBtn.classList.add("hidden");
+}
+
+function refreshProfilerResume() {
+  if (!window.pywebview) return;
+  var url = (document.getElementById("profUrl").value || "").trim();
+  var btn = document.getElementById("profResumeBtn");
+  if (!url || !btn) { if (btn) btn.classList.add("hidden"); return; }
+  window.pywebview.api.has_resume(url).then(function(has) {
+    btn.classList.toggle("hidden", !has);
+  }, function() { btn.classList.add("hidden"); });
+}
+
+function startProfiler(resume) {
+  if (!window.pywebview) return;
+  var url = (document.getElementById("profUrl").value || "").trim();
+  var n = parseInt((document.getElementById("profChats").value || "5"), 10) || 5;
+  var errBox = document.getElementById("profError");
+  errBox.classList.add("hidden");
+  document.getElementById("profResults").classList.add("hidden");
+  document.getElementById("profPhase").textContent = "Запуск...";
+  window.pywebview.api.start_profiler(url, n, !!resume).then(function() {
+    document.getElementById("profCancelBtn").classList.remove("hidden");
+    _profStopPoll();
+    _profPollTimer = setInterval(_profPollStatus, 1500);
+    _profPollStatus();
+  }, function(err) {
+    errBox.textContent = "✗ " + err;
+    errBox.classList.remove("hidden");
+  });
+}
+
+function cancelProfiler() {
+  if (!window.pywebview) return;
+  window.pywebview.api.cancel_profiler().then(function() {}, function(err) {
+    log("profiler cancel failed: " + err);
+  });
+}
+
+function continueProfilerLogin() {
+  if (!window.pywebview) return;
+  window.pywebview.api.continue_after_login().then(function() {
+    document.getElementById("profLogin").classList.add("hidden");
+  }, function(err) {
+    log("profiler continue failed: " + err);
+  });
+}
+
+function _profPollStatus() {
+  if (!window.pywebview) { _profStopPoll(); return; }
+  window.pywebview.api.get_profiler_status().then(function(st) {
+    st = st || {};
+    var label = st.label || st.phase || "?";
+    var detail = st.detail ? " — " + st.detail : "";
+    var counts = (st.candidates_total ? " · кандидат " +
+      Math.min((st.candidates_done || 0) + 1, st.candidates_total) +
+      "/" + st.candidates_total : "");
+    document.getElementById("profPhase").textContent = label + detail + counts;
+    document.getElementById("profLogin").classList.toggle("hidden", !st.awaiting_login);
+    if (st.error) {
+      var errBox = document.getElementById("profError");
+      errBox.textContent = "✗ " + st.error;
+      errBox.classList.remove("hidden");
+    }
+    if (st.phase === "completed" || st.phase === "failed" || st.phase === "cancelled") {
+      _profStopPoll();
+      _profLoadResults();
+    }
+  }, function(err) {
+    _profStopPoll();
+    var errBox = document.getElementById("profError");
+    errBox.textContent = "✗ " + err;
+    errBox.classList.remove("hidden");
+  });
+}
+
+function _profLoadResults() {
+  window.pywebview.api.get_profiler_results().then(function(res) {
+    if (!res || !res.ready) return;
+    _profLastResults = res;
+    _profRenderResults(res);
+  }, function(err) { log("profiler results failed: " + err); });
+}
+
+function _profVerdictColor(rollup) {
+  return rollup === "Compatible" ? "#3fb950"
+    : rollup === "Partial" ? "#d29922"
+    : rollup === "Blocked" ? "#a371f7" : "#f85149";
+}
+
+function _profRenderResults(res) {
+  var table = document.getElementById("profResults");
+  var body = document.getElementById("profResultsBody");
+  body.innerHTML = "";
+  var validations = res.validations || [];
+  var matrix = res.matrix || {};
+  var candidates = matrix.candidates || [];
+  if (!validations.length && !candidates.length) {
+    document.getElementById("profPhase").textContent += " — кандидатов не найдено";
+    return;
+  }
+  validations.forEach(function(v) {
+    var cid = v.candidate_id || "?";
+    var cand = null;
+    candidates.forEach(function(c) {
+      var id = c.preset_id || ((c.preset || {}).id) || "";
+      if (id === cid) cand = c;
+    });
+    var kind = cand ? (cand.kind || "?") : "?";
+    var summary = v.summary || {};
+    var rollup = v.rollup || "?";
+    var tr = document.createElement("tr");
+    var evParts = [];
+    (v.per_chat || []).forEach(function(pc) {
+      var ev = pc.evidence || {};
+      evParts.push(pc.verdict + " (" + (pc.reason || "?") + ") " + (pc.chat_url || "") +
+        " chats=" + (ev.chats || 0) + " msgs=" + (ev.messages || 0) +
+        " user=" + (ev.user || 0) + " asst=" + (ev.assistant || 0));
+    });
+    if (v.skipped) evParts.push("skipped: " + v.skipped);
+    var actionCell = "";
+    if (kind === "selector-new" && rollup === "Compatible") {
+      actionCell = '<button class="small" onclick="saveProfilerPreset(\'' +
+        cid.replace(/'/g, "") + '\')">Save as Preset</button>';
+    } else if (kind === "reuse") {
+      actionCell = '<span class="prof-reuse">already in catalog: ' + cid.replace(/'/g, "") + "</span>";
+    }
+    tr.innerHTML =
+      "<td>" + cid + "</td>" +
+      "<td>" + kind + "</td>" +
+      "<td>" + (summary.total || 0) + "</td>" +
+      '<td style="color:' + _profVerdictColor(rollup) + ';font-weight:bold;">' + rollup + "</td>" +
+      "<td><details><summary>evidence</summary><pre>" +
+      evParts.join("\n").replace(/</g, "&lt;") + "</pre></details></td>" +
+      "<td>" + actionCell + "</td>";
+    body.appendChild(tr);
+  });
+  table.classList.remove("hidden");
+}
+
+function saveProfilerPreset(candidateId) {
+  if (!window.pywebview || !_profLastResults) return;
+  var cand = null;
+  ((_profLastResults.matrix || {}).candidates || []).forEach(function(c) {
+    var id = c.preset_id || ((c.preset || {}).id) || "";
+    if (id === candidateId) cand = c;
+  });
+  if (!cand || cand.kind !== "selector-new" || !cand.preset) {
+    log("profiler: preset not available for " + candidateId);
+    return;
+  }
+  window.pywebview.api.save_preset(JSON.stringify(cand.preset)).then(function(id) {
+    log("profiler: preset saved: " + id);
+    loadCustomPresets();
+  }, function(err) {
+    var errBox = document.getElementById("profError");
+    errBox.textContent = "✗ " + err;
+    errBox.classList.remove("hidden");
   });
 }
 

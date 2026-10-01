@@ -513,6 +513,71 @@ button .step {
   color: #ccc;
 }
 
+/* PROVIDER PROFILER (TICKET-003) */
+.profiler-content {
+  width: 720px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.profiler-content select {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0 14px;
+  padding: 10px;
+  background: #0b0f17;
+  border: 1px solid #2a3345;
+  border-radius: 8px;
+  color: white;
+  font-size: 13px;
+}
+
+.prof-start-row {
+  margin-bottom: 12px;
+}
+
+.prof-phase {
+  font-size: 13px;
+  color: #9fb0c3;
+  margin: 4px 0 8px;
+}
+
+.prof-login {
+  font-size: 13px;
+  color: #f0b429;
+  margin: 8px 0;
+}
+
+.prof-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+.prof-table th, .prof-table td {
+  border: 1px solid #2a3345;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prof-table th {
+  background: #1a2233;
+}
+
+.prof-table pre {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  font-size: 11px;
+  color: #9fb0c3;
+}
+
+.prof-reuse {
+  color: #9fb0c3;
+  font-style: italic;
+}
+
 .hidden {
   display: none !important;
 }

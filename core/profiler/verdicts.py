@@ -89,3 +89,37 @@ def aggregate_report(per_chat: list) -> dict:
             summary[verdict] += 1
             summary["total"] += 1
     return summary
+
+
+# Worst-first priority for mixed summaries (TICKET-003).
+_ROLLUP_PRIORITY = ("Blocked", "Incompatible", "Partial")
+
+
+def candidate_verdict(summary) -> str:
+    """Single rollup verdict for one candidate from its summary (pure).
+
+    TICKET-003 rule: Compatible ⟺ total > 0 and every chat Compatible.
+    Empty summary (total == 0 — skip candidates: no-chats / completed /
+    error) -> Incompatible, so such candidates never get a Save button.
+    Mixed summaries collapse to the worst present verdict:
+    Blocked > Incompatible > Partial. Never raises.
+    """
+    try:
+        total = int((summary or {}).get("total", 0) or 0)
+    except Exception:
+        return "Incompatible"
+    if total <= 0:
+        return "Incompatible"
+    try:
+        compatible = int((summary or {}).get("Compatible", 0) or 0)
+    except Exception:
+        return "Incompatible"
+    if compatible == total:
+        return "Compatible"
+    for verdict in _ROLLUP_PRIORITY:
+        try:
+            if int((summary or {}).get(verdict, 0) or 0) > 0:
+                return verdict
+        except Exception:
+            continue
+    return "Partial"

@@ -77,20 +77,34 @@ def _read_preset_list(path: str):
         return None
 
 
-def _load_catalog() -> list:
-    """Seed catalog + user catalog (read-only): seed first, user overrides by id."""
-    seed = _read_preset_list(SEED_CATALOG)
+def _seed_path_fallback() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..",
+        "presets", "seed_presets.json")
+
+
+def _load_catalog_from(storage_dir: str, seed_path: str = "") -> list:
+    """Seed catalog + user catalog (read-only) with explicit directories.
+
+    Same merge rule as ``_load_catalog`` (seed first, user overrides by id);
+    split out so the UI worker (TICKET-003) can reuse the logic against the
+    app storage dir instead of duplicating it.
+    """
+    seed = _read_preset_list(seed_path or SEED_CATALOG)
     if seed is None:
-        seed = _read_preset_list(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "..",
-            "presets", "seed_presets.json")) or []
-    user = _read_preset_list(os.path.join(_resolve_storage_dir(),
+        seed = _read_preset_list(_seed_path_fallback()) or []
+    user = _read_preset_list(os.path.join(storage_dir or "",
                                           "custom_presets.json")) or []
     merged = {}
     for preset in list(seed) + list(user):
         if isinstance(preset, dict) and preset.get("id"):
             merged[preset["id"]] = preset
     return list(merged.values())
+
+
+def _load_catalog() -> list:
+    """Seed catalog + user catalog (read-only): seed first, user overrides by id."""
+    return _load_catalog_from(_resolve_storage_dir())
 
 
 def _chat_targets_from_observations(observations: dict, n_chats: int) -> list:

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7.1 — Provider Profiler UI (TICKET-003, 2026-10-02)
+### New
+- **Provider Profiler в UI**: кнопка `+ Profile new provider` в Custom 1/2 → модалка (URL, чаты 3/5/10, Start/Resume/Cancel) → фазы Discovery → Validation → Matrix → таблица кандидатов с вердиктами и evidence → `Save as Preset` только для Compatible `selector-new`; reuse — «already in catalog: id».
+- **`core/preset_catalog.py`**: `save_preset` (validate → sanitize → STOP на секретах → атомарный upsert) + `delete_preset` + `load_catalog`; `candidate_verdict` (Compatible ⟺ все чаты Compatible, пусто → Incompatible).
+- **`core/profiler/worker.py`**: фоновый worker на том же engine (под-пробы, `_detect_product_filter`, checkpoint v2, login-пауза + Continue); чужой CDP-браузер не закрывается.
+- **Bridge**: `start_profiler/get_profiler_status/get_profiler_results/continue_after_login/cancel_profiler/has_resume/save_preset/delete_preset`; взаимная блокировка с Sync All (BUSY-отказ в обе стороны, без race).
+
 ## v0.7.0 — Provider Profiler engine (TICKET-002-L, 2026-10-01)
 ### New
 - **`core/profiler/`**: automatic preset discovery engine (probes → Provider Profile → Preset Matrix → validation on N chats with evidence → checkpoint/resume). CLI `python -m core.profiler.run --url … [--chats 5] [--out profiler_output/]`; outputs `provider_profile.json + preset_matrix.json + validation_report.md`. Validation is target-driven (`href | index:N`, stable frozen snapshot — button lists work); checkpoint schema v2 (`target_token`, legacy v1 incompatible → `--fresh`, no migration). No UI, no `*_js` synthesis, no writes to `config.json`/`custom_presets.json`, no `analysis/*` imports.

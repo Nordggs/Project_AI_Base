@@ -28,6 +28,8 @@ from core.custom_config import (
 )
 from conversation.enrichment import Enricher, RuntimeData, BlobEntry, TraceEntry, AnchorData
 from exporters.writer import ExportWriter
+from core import preset_catalog as preset_catalog_mod
+from core.profiler import worker as profiler_worker_mod
 
 
 def _resolve_ui_url():
@@ -259,12 +261,18 @@ class API:
 
     def get_providers_status(self):
         a = self._app
+        worker = getattr(a, "_profiler_worker", None)
+        try:
+            profiler_running = bool(worker is not None and worker.is_running())
+        except Exception:
+            profiler_running = False
         return {
             "gemini": a._gemini_connect_state == "connected",
             "qwen": a._qwen_connected,
             "chatgpt": a._chatgpt_connected,
             "claude": a._claude_connected,
             "deepseek": a.pw is not None,
+            "profiler": profiler_running,
         }
 
     def connect_gemini(self):
@@ -365,6 +373,119 @@ class API:
     def bind_preset(self, slot, preset_id):
         return self._app.bind_preset(slot, preset_id)
 
+    def save_preset(self, preset_json):
+        """Save a validated preset to the shared catalog (TICKET-003).
+
+        Seeds the catalog first (same source list_presets reads), then
+        atomic upsert. Errors -> RuntimeError, never "ERR:".
+        Returns the preset id.
+        """
+        try:
+            preset = json.loads(preset_json) if isinstance(preset_json, str) else preset_json
+        except Exception as exc:
+            raise RuntimeError(f"save_preset: invalid JSON ({exc})")
+        self.list_presets()
+        ok, errors = preset_catalog_mod.save_preset(self._app._storage_dir, preset)
+        if not ok:
+            raise RuntimeError("save_preset: " + "; ".join(errors))
+        self.list_presets()
+        return preset.get("id", "") if isinstance(preset, dict) else ""
+
+    def delete_preset(self, preset_id):
+        """Delete a preset from the shared catalog by id."""
+        ok, errors = preset_catalog_mod.delete_preset(self._app._storage_dir, preset_id)
+        if not ok:
+            raise RuntimeError("delete_preset: " + "; ".join(errors))
+        self.list_presets()
+        return "OK"
+
+    def start_profiler(self, url, n_chats=5, resume=False):
+        """Start a Provider Profiler run (fire-and-forget). Returns STARTED.
+
+        Refuses with RuntimeError("BUSY...") while any export runs (and
+        vice versa via _do_sync_all guard), under the shared start lock.
+        """
+        url = (url or "").strip() if isinstance(url, str) else ""
+        if not url.startswith(("http://", "https://")):
+            raise RuntimeError("start_profiler: URL must start with http(s)://")
+        try:
+            n_chats = int(n_chats or 0)
+        except Exception:
+            n_chats = 0
+        app = self._app
+        lock = getattr(app, "_profile_sync_lock", None)
+        if lock is None:  # pragma: no cover — legacy fixture safety
+            lock = threading.Lock()
+        with lock:
+            states = getattr(app, "_sync_state", {}) or {}
+            busy = sorted(n for n, s in states.items()
+                          if s == "running" and n != "profiler")
+            if busy or getattr(app, "_sync_all_reserved", False):
+                raise RuntimeError(f"BUSY: export running ({','.join(busy)})")
+            worker = getattr(app, "_profiler_worker", None)
+            if worker is not None and worker.is_running():
+                raise RuntimeError("BUSY: profiler already running")
+            cdp_endpoint = ""
+            try:
+                if app.cdp.state == "running":
+                    cdp_endpoint = "http://127.0.0.1:9222"
+            except Exception:
+                cdp_endpoint = ""
+            seed = _resolve_seed_path()
+            worker = profiler_worker_mod.ProfilerWorker(
+                app._storage_dir,
+                log=lambda msg: app._push_log(msg),
+                cdp_endpoint=cdp_endpoint,
+                seed_path=seed,
+            )
+            app._profiler_worker = worker
+            thread = worker.start(url, n_chats=n_chats, resume=bool(resume))
+            # Under the lock, JS-free: closes the race where _do_sync_all
+            # could pass its check between worker.start and the JS push.
+            app._sync_state["profiler"] = "running"
+        app.set_sync_state("profiler", "running")
+        threading.Thread(target=app._watch_profiler,
+                         args=(worker, thread), daemon=True).start()
+        return "STARTED"
+
+    def get_profiler_status(self):
+        worker = getattr(self._app, "_profiler_worker", None)
+        if worker is None:
+            return {"phase": "idle", "label": "Idle", "detail": "",
+                    "candidates_done": 0, "candidates_total": 0,
+                    "chat_current": 0, "chat_total": 0,
+                    "awaiting_login": False, "error": ""}
+        return worker.get_status()
+
+    def get_profiler_results(self):
+        worker = getattr(self._app, "_profiler_worker", None)
+        results = worker.get_results() if worker is not None else None
+        if not results:
+            return {"ready": False}
+        out = {"ready": True}
+        out.update(results)
+        return out
+
+    def continue_after_login(self):
+        worker = getattr(self._app, "_profiler_worker", None)
+        if worker is None or not worker.is_running():
+            raise RuntimeError("profiler is not running")
+        worker.continue_after_login()
+        return "OK"
+
+    def cancel_profiler(self):
+        worker = getattr(self._app, "_profiler_worker", None)
+        if worker is not None:
+            worker.cancel()
+        return "OK"
+
+    def has_resume(self, url):
+        worker = getattr(self._app, "_profiler_worker", None)
+        if worker is not None:
+            return bool(worker.has_resume(url))
+        probe = profiler_worker_mod.ProfilerWorker(self._app._storage_dir)
+        return bool(probe.has_resume(url))
+
     def connect_deepseek(self):
         return self._app.add_account("https://chat.deepseek.com/")
 
@@ -427,7 +548,7 @@ def _check_cdp_alive():
 
 # ── App version + update check (GitHub Releases only) ──
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 REPO_OWNER = "Nordggs"
 REPO_NAME = "Project_AI_Base"
 
@@ -554,6 +675,7 @@ class App:
             "gemini": "idle", "qwen": "idle",
             "chatgpt": "idle", "claude": "idle", "deepseek": "idle",
             "custom1": "idle", "custom2": "idle",
+            "profiler": "idle",
         }
         self._sync_done_events = {}
         self._sync_results = {}
@@ -627,6 +749,11 @@ class App:
         # on loss (restart) navigation falls back to "goto".
         self._preset_binding = {}
         self._preset_catalog = []
+        # TICKET-003: Provider Profiler — mutual exclusion with Sync All
+        # (refusal semantics) + current worker handle.
+        self._profile_sync_lock = threading.Lock()
+        self._profiler_worker = None
+        self._sync_all_reserved = False
 
         # CDP Manager — единый Chrome для всех провайдеров
         self._file_log = None
@@ -2182,6 +2309,51 @@ class App:
             pass
 
     def _do_sync_all(self):
+        """Sync All entry: refuses while the profiler runs (TICKET-003).
+
+        Safe on legacy fixtures (no _profile_sync_lock/_sync_state profiler
+        key): missing attributes degrade to the old behaviour.
+        """
+        lock = getattr(self, "_profile_sync_lock", None)
+        if lock is None:
+            return self._do_sync_all_run()
+        with lock:
+            states = getattr(self, "_sync_state", {}) or {}
+            if states.get("profiler") == "running":
+                self.log.add("[INFO] Sync All — пропущен: Provider Profiler работает")
+                return
+            try:
+                worker = getattr(self, "_profiler_worker", None)
+                profiler_alive = bool(worker is not None and worker.is_running())
+            except Exception:
+                profiler_alive = False
+            if profiler_alive:
+                self.log.add("[INFO] Sync All — пропущен: Provider Profiler работает")
+                return
+            self._sync_all_reserved = True
+        try:
+            return self._do_sync_all_run()
+        finally:
+            self._sync_all_reserved = False
+
+    def _watch_profiler(self, worker, thread):
+        """Bridge the worker thread back to the UI sync dot (TICKET-003)."""
+        try:
+            thread.join()
+        except Exception:
+            pass
+        try:
+            phase = worker.get_status().get("phase", "")
+        except Exception:
+            phase = ""
+        if phase == "completed":
+            self.set_sync_state("profiler", "done")
+        elif phase == "failed":
+            self.set_sync_state("profiler", "failed")
+        else:
+            self.set_sync_state("profiler", "idle")
+
+    def _do_sync_all_run(self):
         try:
             self.window.evaluate_js("setSyncRunning(true)")
         except Exception:

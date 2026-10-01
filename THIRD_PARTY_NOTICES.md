@@ -9,7 +9,7 @@ under their own licenses:
 | [Playwright](https://github.com/microsoft/playwright) | 1.62.0 | Apache-2.0 |
 | [PyWebView](https://github.com/r0x0r/pywebview) | 6.2.1 | BSD-3-Clause |
 | [Python](https://www.python.org/) (bundled runtime) | 3.14.5 | PSF License Agreement |
-| [PyInstaller](https://www.pyinstaller.org/) (bundling tool + bootloader) | 6.22.0 | GPL-2.0-or-later with a special exception |
+| [PyInstaller](https://www.pyinstaller.org/) (bundling tool + bootloader) | 6.22.3 | GPL-2.0-or-later with a special exception |
 
 ## Chromium
 

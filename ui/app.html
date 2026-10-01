@@ -31,7 +31,7 @@
   <div id="aboutModal" class="modal hidden">
     <div class="modal-content about-content">
       <h3>AI Chat Exporter</h3>
-      <div class="about-version" id="aboutVersion">v0.6.0</div>
+      <div class="about-version" id="aboutVersion">v0.7.1</div>
       <p>Экспорт диалогов из ChatGPT, Gemini, Claude, Qwen и DeepSeek в Markdown.</p>
       <h4>Как начать работу</h4>
       <ol>
@@ -104,6 +104,7 @@
           <span class="pv-item"><span id="pvDeepSeek" class="pv-dot dot-off">○</span> DeepSeek</span>
           <span class="pv-item"><span id="pvCustom1" class="pv-dot dot-off">○</span> Custom 1</span>
           <span class="pv-item"><span id="pvCustom2" class="pv-dot dot-off">○</span> Custom 2</span>
+          <span class="pv-item"><span id="pvProfiler" class="pv-dot dot-off">○</span> Profiler</span>
         </span>
       </div>
       <button class="icon-btn" onclick="openAbout()" title="О программе">?</button>
@@ -361,6 +362,7 @@
           </label>
           <div class="custom-actions">
             <button class="small" onclick="applyCustomPreset(1)">Применить preset</button>
+            <button class="small" onclick="openProfiler()">+ Profile new provider</button>
           </div>
           <div id="c1PresetHint" class="custom-hint hidden"></div>
           <div class="custom-advanced">--- Advanced / Manual configuration (ручная настройка для продвинутых — обычному пользователю не нужна) ---</div>
@@ -470,6 +472,7 @@
           </label>
           <div class="custom-actions">
             <button class="small" onclick="applyCustomPreset(2)">Применить preset</button>
+            <button class="small" onclick="openProfiler()">+ Profile new provider</button>
           </div>
           <div id="c2PresetHint" class="custom-hint hidden"></div>
           <div class="custom-advanced">--- Advanced / Manual configuration (ручная настройка для продвинутых — обычному пользователю не нужна) ---</div>
@@ -543,7 +546,7 @@
     </div>
 
     <div class="version">
-      <span id="versionText">v0.6.0</span>
+      <span id="versionText">v0.7.1</span>
       <button id="updateBadge" class="update-badge hidden" onclick="showUpdateModal()" title=""></button>
     </div>
 
@@ -559,6 +562,39 @@
       <button onclick="saveChatLog()">Save Chat Log</button>
     </div>
     <pre id="sidebarLog"></pre>
+  </div>
+
+  <!-- PROVIDER PROFILER MODAL (TICKET-003) -->
+  <div id="profilerModal" class="modal hidden">
+    <div class="modal-content profiler-content">
+      <h3>Provider Profiler</h3>
+      <label for="profUrl">URL провайдера:</label>
+      <input id="profUrl" placeholder="https://example-ai.com/" oninput="refreshProfilerResume()" />
+      <label for="profChats">Чатов для проверки (мин. 3):</label>
+      <select id="profChats">
+        <option value="3">3</option>
+        <option value="5" selected>5</option>
+        <option value="10">10</option>
+      </select>
+      <div class="modal-actions prof-start-row">
+        <button id="profStartBtn" class="primary" onclick="startProfiler(false)">Start Profiling</button>
+        <button id="profResumeBtn" class="hidden" onclick="startProfiler(true)">Resume</button>
+        <button id="profCancelBtn" class="cancel hidden" onclick="cancelProfiler()">Cancel</button>
+        <button class="cancel" onclick="closeProfiler()">Close</button>
+      </div>
+      <div id="profPhase" class="prof-phase"></div>
+      <div id="profLogin" class="prof-login hidden">
+        Login required — войдите в открывшемся браузере, затем
+        <button class="small" onclick="continueProfilerLogin()">Continue</button>
+      </div>
+      <div id="profError" class="hidden" style="color:#f55;font-size:12px;margin:8px 0;"></div>
+      <table id="profResults" class="prof-table hidden">
+        <thead><tr>
+          <th>Candidate</th><th>Strategy</th><th>Chats</th><th>Result</th><th>Evidence</th><th></th>
+        </tr></thead>
+        <tbody id="profResultsBody"></tbody>
+      </table>
+    </div>
   </div>
 
   <script src="app.js"></script>
