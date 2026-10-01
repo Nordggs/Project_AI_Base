@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.0 — Provider Profiler engine (TICKET-002-L, 2026-10-01)
+### New
+- **`core/profiler/`**: automatic preset discovery engine (probes → Provider Profile → Preset Matrix → validation on N chats with evidence → checkpoint/resume). CLI `python -m core.profiler.run --url … [--chats 5] [--out profiler_output/]`; outputs `provider_profile.json + preset_matrix.json + validation_report.md`. Validation is target-driven (`href | index:N`, stable frozen snapshot — button lists work); checkpoint schema v2 (`target_token`, legacy v1 incompatible → `--fresh`, no migration). No UI, no `*_js` synthesis, no writes to `config.json`/`custom_presets.json`, no `analysis/*` imports.
+- Fixed research flow: open the first chat (goto, then click fallback) before mining messages; user/assistant triples are discovered and carried into candidates; product-filter (empty-title links) is reported as `Blocked` with evidence; `--resume` truly skips Completed and `--chats N` is honoured; reuse candidates are validated too (seed + storage catalog).
+- Binding check: every opened target is verified (URL/title/message shift + snapshot text for click targets); `wrong_target` is graded — `Incompatible` = no switch proven, `Partial` = switched but this target unconfirmed. Smoke: `--cdp` attaches to a trusted running Chrome (attached browser is never closed).
+
 ## v0.6.0 — Custom presets layer (TICKET-002, 2026-09-30)
 
 ### New

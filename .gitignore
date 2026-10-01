@@ -22,6 +22,8 @@ release/
 
 # Internal analysis
 analysis/
+# Provider Profiler output (TICKET-002-L, production artifact, not committed)
+profiler_output/
 inbox/
 SOURCE/
 
