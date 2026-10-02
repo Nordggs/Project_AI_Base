@@ -7,7 +7,7 @@ import pytest
 
 UI_DIR = os.path.join(os.path.dirname(__file__), "..", "ui")
 
-PROVIDERS = ["deepseek", "gemini", "qwen", "chatgpt", "claude", "custom1", "custom2"]
+PROVIDERS = ["deepseek", "gemini", "qwen", "chatgpt", "claude", "perplexity", "custom1", "custom2"]
 
 
 def _read(name):
@@ -21,13 +21,13 @@ class TestTabPanelMapping:
     def test_tab_count(self):
         html = _read("app.html")
         tabs = re.findall(r'class="tab[^"]*"\s+data-provider="(\w+)"', html)
-        assert len(tabs) == 7, f"Expected 7 tabs, found {len(tabs)}: {tabs}"
+        assert len(tabs) == 8, f"Expected 8 tabs, found {len(tabs)}: {tabs}"
         assert set(tabs) == set(PROVIDERS), f"Tab providers mismatch: {tabs}"
 
     def test_panel_count(self):
         html = _read("app.html")
         panels = re.findall(r'class="tab-panel[^"]*"\s+data-panel="(\w+)"', html)
-        assert len(panels) == 7, f"Expected 7 panels, found {len(panels)}: {panels}"
+        assert len(panels) == 8, f"Expected 8 panels, found {len(panels)}: {panels}"
         assert set(panels) == set(PROVIDERS), f"Panel providers mismatch: {panels}"
 
     def test_tab_panel_names_match(self):
@@ -78,6 +78,7 @@ class TestJSFunctions:
             ("setQwenConnected", "qwen"),
             ("setChatGPTConnected", "chatgpt"),
             ("setClaudeConnected", "claude"),
+            ("setPerplexityConnected", "perplexity"),
         ]:
             pattern = rf"function\s+{fn}\b.*?setTabConnectionState\('{prov}'"
             assert re.search(pattern, js, re.DOTALL), (

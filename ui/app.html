@@ -31,7 +31,7 @@
   <div id="aboutModal" class="modal hidden">
     <div class="modal-content about-content">
       <h3>AI Chat Exporter</h3>
-      <div class="about-version" id="aboutVersion">v0.7.1</div>
+      <div class="about-version" id="aboutVersion">v0.8.0</div>
       <p>Экспорт диалогов из ChatGPT, Gemini, Claude, Qwen и DeepSeek в Markdown.</p>
       <h4>Как начать работу</h4>
       <ol>
@@ -101,6 +101,7 @@
           <span class="pv-item"><span id="pvQwen" class="pv-dot dot-off">○</span> Qwen</span>
           <span class="pv-item"><span id="pvChatGPT" class="pv-dot dot-off">○</span> ChatGPT</span>
           <span class="pv-item"><span id="pvClaude" class="pv-dot dot-off">○</span> Claude</span>
+          <span class="pv-item"><span id="pvPerplexity" class="pv-dot dot-off">○</span> Perplexity</span>
           <span class="pv-item"><span id="pvDeepSeek" class="pv-dot dot-off">○</span> DeepSeek</span>
           <span class="pv-item"><span id="pvCustom1" class="pv-dot dot-off">○</span> Custom 1</span>
           <span class="pv-item"><span id="pvCustom2" class="pv-dot dot-off">○</span> Custom 2</span>
@@ -132,6 +133,7 @@
       <button class="tab" data-provider="qwen" onclick="switchTab('qwen')">Qwen</button>
       <button class="tab" data-provider="chatgpt" onclick="switchTab('chatgpt')">ChatGPT</button>
       <button class="tab" data-provider="claude" onclick="switchTab('claude')">Claude</button>
+      <button class="tab" data-provider="perplexity" onclick="switchTab('perplexity')">Perplexity</button>
       <button class="tab" data-provider="custom1" onclick="switchTab('custom1')">Custom 1</button>
       <button class="tab" data-provider="custom2" onclick="switchTab('custom2')">Custom 2</button>
     </div>
@@ -242,6 +244,41 @@
         <button id="btnClaudeSyncSelected" class="primary" disabled onclick="syncClaudeSelected()">Синхронизировать выбранный чат</button>
       </div>
       </div><!-- /claude panel -->
+
+      <!-- PERPLEXITY -->
+      <div class="tab-panel" data-panel="perplexity">
+      <div class="card perplexity">
+        <div class="card-header">
+          <h2>Perplexity</h2>
+          <span class="badge">Нет аккаунтов</span>
+          <button class="small" onclick="addPerplexityAccount()">+ аккаунт</button>
+        </div>
+
+        <div class="empty" id="pxEmpty">
+          Подключите аккаунт Perplexity для авторизации.
+        </div>
+
+        <!-- Account info (hidden until connected) -->
+        <div id="pxAccount" class="account hidden">
+          <div class="name">Perplexity</div>
+          <div class="status ok">подключен</div>
+          <div class="actions">
+            <button onclick="reconnectPerplexity()">переподключить</button>
+          </div>
+        </div>
+
+        <button id="btnPerplexitySyncAll" class="primary" disabled onclick="syncPerplexityAll()">Синхронизировать Perplexity</button>
+        <button id="btnStopPX" class="danger" onclick="cancelAll()">⏹ Остановить</button>
+
+        <!-- URL list (hidden until connected) -->
+        <div id="perplexityUrls" class="url-area hidden">
+          <label for="pxUrls">URL чатов (по одному на строке):</label>
+          <textarea id="pxUrls" placeholder="https://www.perplexity.ai/search/..."></textarea>
+        </div>
+
+        <button id="btnPerplexitySyncSelected" class="primary" disabled onclick="syncPerplexitySelected()">Синхронизировать выбранный чат</button>
+      </div>
+      </div><!-- /perplexity panel -->
 
       <!-- QWEN -->
       <div class="tab-panel" data-panel="qwen">
@@ -546,7 +583,7 @@
     </div>
 
     <div class="version">
-      <span id="versionText">v0.7.1</span>
+      <span id="versionText">v0.8.0</span>
       <button id="updateBadge" class="update-badge hidden" onclick="showUpdateModal()" title=""></button>
     </div>
 
@@ -576,6 +613,10 @@
         <option value="5" selected>5</option>
         <option value="10">10</option>
       </select>
+      <div id="profCdpWarn" class="prof-login hidden">
+        Chrome приложения не запущен — профайлер откроет собственное окно, где вход через Google
+        будет заблокирован («браузер небезопасен»). Запустите Chrome кнопкой «Запустить Chrome» выше и войдите в аккаунт там.
+      </div>
       <div class="modal-actions prof-start-row">
         <button id="profStartBtn" class="primary" onclick="startProfiler(false)">Start Profiling</button>
         <button id="profResumeBtn" class="hidden" onclick="startProfiler(true)">Resume</button>

@@ -22,6 +22,7 @@ class Provider(str, Enum):
     CLAUDE = "claude"
     QWEN = "qwen"
     DEEPSEEK = "deepseek"
+    PERPLEXITY = "perplexity"
 
 
 def _normalize_ts(ts: Any) -> float | None:
@@ -57,6 +58,8 @@ class IRBuilder:
                 return IRBuilder._from_generic("qwen", raw, "dom")
             case Provider.DEEPSEEK:
                 return IRBuilder._from_generic("deepseek", raw, "scroll")
+            case Provider.PERPLEXITY:
+                return IRBuilder._from_generic("perplexity", raw, "dom")
             case _:
                 raise ValueError(f"Unknown provider: {provider}")
 

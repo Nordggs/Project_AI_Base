@@ -17,6 +17,7 @@ from adapters.deepseek import DeepSeekAdapter
 from adapters.qwen import QwenAdapter
 from adapters.chatgpt import ChatGPTAdapter
 from adapters.claude import ClaudeAdapter
+from adapters.perplexity import PerplexityAdapter
 from adapters.custom import CustomAdapter
 from adapters.cdp_manager import CDPManager
 from core.custom_config import (
@@ -271,6 +272,7 @@ class API:
             "qwen": a._qwen_connected,
             "chatgpt": a._chatgpt_connected,
             "claude": a._claude_connected,
+            "perplexity": a._perplexity_connected,
             "deepseek": a.pw is not None,
             "profiler": profiler_running,
         }
@@ -306,6 +308,12 @@ class API:
 
     def sync_claude(self, urls_json):
         return self._app.sync_claude(urls_json)
+
+    def connect_perplexity(self):
+        return self._app.add_perplexity_account()
+
+    def sync_perplexity(self, urls_json):
+        return self._app.sync_perplexity(urls_json)
 
     def get_custom_config(self, slot):
         return self._app.get_custom_config(slot)
@@ -548,7 +556,7 @@ def _check_cdp_alive():
 
 # ── App version + update check (GitHub Releases only) ──
 
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.8.0"
 REPO_OWNER = "Nordggs"
 REPO_NAME = "Project_AI_Base"
 
@@ -668,12 +676,14 @@ class App:
             "qwen": threading.Lock(),
             "chatgpt": threading.Lock(),
             "claude": threading.Lock(),
+            "perplexity": threading.Lock(),
             "custom1": threading.Lock(),
             "custom2": threading.Lock(),
         }
         self._sync_state = {
             "gemini": "idle", "qwen": "idle",
             "chatgpt": "idle", "claude": "idle", "deepseek": "idle",
+            "perplexity": "idle",
             "custom1": "idle", "custom2": "idle",
             "profiler": "idle",
         }
@@ -738,6 +748,14 @@ class App:
         self._connect_claude_done = threading.Event()
         self._claude_export_active = False
         self._claude_session_epoch = 0
+
+        # Perplexity (CDP page in same browser as Gemini)
+        self.perplexity_page = None
+        self._perplexity_connected = False
+        self._perplexity_connect_lock = False
+        self._connect_perplexity_done = threading.Event()
+        self._perplexity_export_active = False
+        self._perplexity_session_epoch = 0
 
         # Custom Web providers
         self.custom1_page = None
@@ -968,7 +986,8 @@ class App:
                 if cmd == "connect_gemini":      self._do_connect_gemini(arg)
                 elif cmd == "soft_stop":
                     for page in [self.qwen_page, self.gemini_page, self.chatgpt_page, self.claude_page,
-                                 getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
+                                  self.perplexity_page,
+                                  getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
                         try:
                             if page:
                                 page.evaluate("window.stop()")
@@ -976,7 +995,8 @@ class App:
                             pass
                 elif cmd == "close_cdp":
                     for page in [self.gemini_page, self.qwen_page, self.chatgpt_page, self.claude_page,
-                                 getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
+                                  self.perplexity_page,
+                                  getattr(self, "custom1_page", None), getattr(self, "custom2_page", None)]:
                         try:
                             if page:
                                 page.close()
@@ -995,7 +1015,8 @@ class App:
                         self._sync_results[name] = res or {"provider": name}
                     finally:
                         reset = {"gemini": "_gemini_export_active", "qwen": "_qwen_export_active",
-                                 "chatgpt": "_chatgpt_export_active", "claude": "_claude_export_active"}
+                                  "chatgpt": "_chatgpt_export_active", "claude": "_claude_export_active",
+                                  "perplexity": "_perplexity_export_active"}
                         flag = reset.get(name)
                         if flag:
                             setattr(self, flag, False)
@@ -1023,6 +1044,10 @@ class App:
                     with self._cdp_lock:
                         self._do_connect_claude()
                     self._connect_claude_done.set()
+                elif cmd == "connect_perplexity":
+                    with self._cdp_lock:
+                        self._do_connect_perplexity()
+                    self._connect_perplexity_done.set()
                 elif cmd == "connect_custom1":
                     try:
                         with self._cdp_lock:
@@ -1090,6 +1115,8 @@ class App:
                     self._connect_chatgpt_done.set()
                 elif cmd == "connect_claude":
                     self._connect_claude_done.set()
+                elif cmd == "connect_perplexity":
+                    self._connect_perplexity_done.set()
                 elif cmd.startswith("connect_custom"):
                     ev = self._sync_done_events.pop(cmd, None)
                     if ev:
@@ -1226,6 +1253,7 @@ class App:
             "qwen": self.qwen_page,
             "chatgpt": self.chatgpt_page,
             "claude": self.claude_page,
+            "perplexity": self.perplexity_page,
             "custom1": getattr(self, "custom1_page", None),
             "custom2": getattr(self, "custom2_page", None),
         }.get(name)
@@ -1247,6 +1275,7 @@ class App:
             "qwen": lambda: QwenAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
             "chatgpt": lambda: ChatGPTAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
             "claude": lambda: ClaudeAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
+            "perplexity": lambda: PerplexityAdapter(page, self._cdp_lock, self._push_log, lambda: self._cancel_flag),
         }
         fn = switch.get(name)
         if fn is None:
@@ -1255,8 +1284,8 @@ class App:
 
     def _export_provider(self, name, urls=None, prompt=None):
         display = {"chatgpt": "ChatGPT", "deepseek": "DeepSeek", "gemini": "Gemini",
-                   "qwen": "Qwen", "claude": "Claude",
-                   "custom1": "Custom 1", "custom2": "Custom 2"}.get(name, name.title())
+                    "qwen": "Qwen", "claude": "Claude", "perplexity": "Perplexity",
+                    "custom1": "Custom 1", "custom2": "Custom 2"}.get(name, name.title())
         lock = self._locks[name]
         if not lock.acquire(blocking=False):
             self.log.add(f"[WARN] {name} sync BUSY")
@@ -1724,6 +1753,94 @@ class App:
         self._claude_connected = False
         self.add_claude_account()
 
+    def _do_connect_perplexity(self):
+        self.log.add("[INFO] Connecting to Perplexity via CDP...")
+        if self.cdp.state != "running":
+            raise RuntimeError("CDP not running — launch Chrome first")
+
+        if self.perplexity_page:
+            try:
+                self.perplexity_page.close()
+            except Exception:
+                pass
+            self.perplexity_page = None
+
+        try:
+            browser = self._cdp_browser()
+            page = browser.contexts[0].new_page()
+            page.goto("https://www.perplexity.ai/", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_load_state("domcontentloaded")
+
+            if not self._is_page_alive(page):
+                raise RuntimeError("Page not alive after navigation")
+
+            self.perplexity_page = page
+            self._perplexity_session_epoch += 1
+            self._perplexity_connected = True
+            try:
+                self.window.evaluate_js("setPerplexityConnected()")
+            except Exception:
+                pass
+            self.log.add("[INFO] Perplexity connected via CDP")
+        except Exception as e:
+            self._perplexity_connected = False
+            self.perplexity_page = None
+            self.log.add(f"[ERROR] Perplexity CDP attach failed: {e}")
+            raise
+
+    def ensure_perplexity_alive(self):
+        if not self.perplexity_page:
+            self._perplexity_connected = False
+            return False
+        try:
+            self.perplexity_page.url
+            return True
+        except Exception:
+            self.perplexity_page = None
+            self._perplexity_connected = False
+            self._push_log("Perplexity page lost — reconnect required")
+            return False
+
+    def add_perplexity_account(self):
+        if self._perplexity_connect_lock:
+            return "BUSY"
+        if self._perplexity_connected:
+            return "OK"
+        self._perplexity_connect_lock = True
+        try:
+            self._connect_perplexity_done.clear()
+            self._gw_queue.put(("connect_perplexity", ""))
+            if not self._connect_perplexity_done.wait(timeout=30):
+                raise RuntimeError("Perplexity CDP connection timeout")
+            if not self._perplexity_connected:
+                raise RuntimeError("Perplexity CDP connection failed")
+            return "OK"
+        finally:
+            self._perplexity_connect_lock = False
+
+    def sync_perplexity(self, urls_json):
+        if not self._perplexity_connected:
+            raise RuntimeError("Perplexity not connected")
+        if not _check_cdp_alive():
+            raise RuntimeError("CDP not available")
+        if self._perplexity_export_active:
+            raise RuntimeError("Perplexity export already in progress")
+        urls = json.loads(urls_json)
+        self.log.add(f"[INFO] Enqueuing Perplexity batch export ({len(urls)} urls)")
+        self._gw_queue.put(("export_provider", ("perplexity", urls)))
+        return "STARTED"
+
+    def reconnect_perplexity(self):
+        self.log.add("[INFO] Reconnecting Perplexity...")
+        if self.perplexity_page:
+            try:
+                self.perplexity_page.close()
+            except Exception:
+                pass
+            self.perplexity_page = None
+        self._perplexity_connected = False
+        self.add_perplexity_account()
+
     # ── URL watcher (runs in _pw_worker idle loop) ──
 
     def _watch_url(self):
@@ -1930,6 +2047,7 @@ class App:
         self.qwen_page = None
         self.chatgpt_page = None
         self.claude_page = None
+        self.perplexity_page = None
         self.custom1_page = None
         self.custom2_page = None
         self.pw = None
@@ -1937,6 +2055,7 @@ class App:
         self._qwen_connected = False
         self._chatgpt_connected = False
         self._claude_connected = False
+        self._perplexity_connected = False
         self._custom1_connected = False
         self._custom2_connected = False
         self._seen_urls.clear()
@@ -1945,7 +2064,7 @@ class App:
             self.window.evaluate_js("""
                 requestAnimationFrame(() => {
                     document.querySelectorAll('.pv-dot').forEach(d => d.className = 'pv-dot dot-off');
-                    ['deepseek','gemini','qwen','chatgpt','claude'].forEach(p => {
+                    ['deepseek','gemini','qwen','chatgpt','claude','perplexity'].forEach(p => {
                         const b = document.querySelector('.'+p+' .badge');
                         if(b) { b.textContent='не подключено'; b.className='badge'; }
                     });
@@ -2299,6 +2418,7 @@ class App:
             "qwen": self._qwen_connected,
             "chatgpt": self._chatgpt_connected,
             "claude": self._claude_connected,
+            "perplexity": self._perplexity_connected,
         }.get(name, False)
 
     def set_sync_state(self, provider, state):
@@ -2358,8 +2478,8 @@ class App:
             self.window.evaluate_js("setSyncRunning(true)")
         except Exception:
             pass
-        self.log.add("[INFO] Sync All — ChatGPT → Gemini → Claude → Qwen → DeepSeek")
-        order = ["chatgpt", "gemini", "claude", "qwen", "deepseek"]
+        self.log.add("[INFO] Sync All — ChatGPT → Gemini → Claude → Qwen → DeepSeek → Perplexity")
+        order = ["chatgpt", "gemini", "claude", "qwen", "deepseek", "perplexity"]
         for slot in (1, 2):
             name = f"custom{slot}"
             if self._is_provider_connected(name) and self._get_custom_mode(slot) == "web":

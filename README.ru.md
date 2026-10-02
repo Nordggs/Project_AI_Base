@@ -6,13 +6,13 @@
 
 ![AI Chat Exporter](ui/splash.png)
 
-Десктопное приложение для экспорта диалогов AI (**ChatGPT, Gemini, Claude, Qwen, DeepSeek**), а также двух
+Десктопное приложение для экспорта диалогов AI (**ChatGPT, Gemini, Claude, Qwen, DeepSeek, Perplexity**), а также двух
 настраиваемых слотов **Custom 1 / Custom 2**, в локальные Markdown-файлы.
 Браузерный экспорт не требует API-ключей; режим Custom API может использовать ваш собственный ключ. Без облачных сервисов, без HTTP-сервера.
 
 ## Возможности
 
-- Экспорт диалогов **ChatGPT, Gemini, Claude, Qwen, DeepSeek**
+- Экспорт диалогов **ChatGPT, Gemini, Claude, Qwen, DeepSeek, Perplexity**
 - Слоты **Custom 1 / Custom 2**, каждый в одном из двух режимов:
   - **Web Browser Export** — экспорт произвольного веб-чата по заданным CSS-селекторам или JS
   - **API** — отправка промпта на OpenAI- или Anthropic-совместимый endpoint и сохранение ответа
@@ -25,20 +25,20 @@
 
 ## Скачать
 
-- **[AIChatExporter-Setup-0.7.1.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — установщик с ярлыками Desktop и Start Menu (рекомендуется)
-- **[AIChatExporter-Portable-0.7.1.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — портативная сборка, работает без установки
+- **[AIChatExporter-Setup-0.8.0.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — установщик с ярлыками Desktop и Start Menu (рекомендуется)
+- **[AIChatExporter-Portable-0.8.0.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — портативная сборка, работает без установки
 
 ## Установка
 
 ### Вариант 1 — Установщик (рекомендуется)
 
-1. Запустите `AIChatExporter-Setup-0.7.1.exe`
+1. Запустите `AIChatExporter-Setup-0.8.0.exe`
 2. Следуйте инструкциям — создаются ярлыки Desktop и Start Menu
 3. Запустите **AI Chat Exporter**
 
 ### Вариант 2 — Portable
 
-Распакуйте `AIChatExporter-Portable-0.7.1.zip` в любую папку и запустите `AIChatExporter.exe`. Работает без установки.
+Распакуйте `AIChatExporter-Portable-0.8.0.zip` в любую папку и запустите `AIChatExporter.exe`. Работает без установки.
 
 ### Из исходников
 
@@ -58,7 +58,7 @@ python main.py
 Вход в аккаунты провайдеров выполняется в открывшемся окне браузера — сессия сохраняется в профиле
 (`~/.ai_pipeline/chrome_gemini`), повторный вход не требуется.
 
-### ChatGPT / Gemini / Claude / Qwen
+### ChatGPT / Gemini / Claude / Qwen / Perplexity
 
 1. Запустите Chrome через карточку провайдера (**🚀 Запустить Chrome**)
 2. Войдите в аккаунт в открывшемся окне браузера

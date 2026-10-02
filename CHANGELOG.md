@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.8.0 — Perplexity provider (TICKET-004, 2026-10-02)
+### New
+- **Perplexity как отдельный провайдер**: 8-я вкладка в UI (карточка, точка состояния, Connect / Sync) через общий CDP-браузер `_gw_worker` (паттерн Gemini/Qwen).
+- **`adapters/perplexity.py`**: скан sidebar `a[href^="/search/"]`; title-fallback (`aria-label` → видимый label строки → `document.title` → uuid); открытие чата `goto` (гидратирует deep-link) с click-FSM fallback; пропуск пустых тредов как честное «no data».
+- **`exporters/perplexity_extract.py`**: DOM-извлечение user (`[class*="user-bubble"]`) и assistant (`div.prose` с markdown/code/table), merge consecutive same-role, citations в meta (+ пометка `[sources]`), `timestamp`.
+- **`Provider.PERPLEXITY`** + `_from_generic()`; Stable ID из uuid `/search/<uuid>`; display/regex в `exporters/writer.py`.
+- **`main.py`**: Perplexity подключён к единому pipeline `_export_provider` / `_gw_worker` (page, adapter, locks, sync-state, status).
+- **Тесты**: `tests/test_perplexity.py`; `tests/test_ui_tabs.py` 7→8; фикстуры `tests/conftest.py`.
+- Документация: `README.md`, `README.ru.md`, `ARCHITECTURE.md`.
+### Fixed
+- **Provider Profiler: вход через Google**: страница-блокировка автоматизации («этот браузер или приложение небезопасны» / `disallowed_useragent`) теперь распознаётся сразу (`is_login_block_page`) и профилирование падает быстро с понятной инструкцией, вместо невнятного «нет чатов»; предупреждение, когда Chrome приложения не запущен.
+### Notes
+- Отдельный Scroll Engine не требуется: вся история чата присутствует в DOM сразу, подгрузки вверх нет.
+- Известное ограничение: в DOM только время без даты (`HH:MM`).
+
 ## v0.7.1 — Provider Profiler UI (TICKET-003, 2026-10-02)
 ### New
 - **Provider Profiler в UI**: кнопка `+ Profile new provider` в Custom 1/2 → модалка (URL, чаты 3/5/10, Start/Resume/Cancel) → фазы Discovery → Validation → Matrix → таблица кандидатов с вердиктами и evidence → `Save as Preset` только для Compatible `selector-new`; reuse — «already in catalog: id».

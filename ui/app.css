@@ -188,6 +188,7 @@ button .step {
 .tab.connected-qwen     { color: #0ea5e9; }
 .tab.connected-chatgpt  { color: #10a37f; }
 .tab.connected-claude   { color: #cc785c; }
+.tab.connected-perplexity { color: #20b8cd; }
 .tab.connected-custom1  { color: #eab308; }
 .tab.connected-custom2  { color: #eab308; }
 
@@ -197,6 +198,7 @@ button .step {
 .tab.active.connected-qwen     { color: #0ea5e9; }
 .tab.active.connected-chatgpt  { color: #10a37f; }
 .tab.active.connected-claude   { color: #cc785c; }
+.tab.active.connected-perplexity { color: #20b8cd; }
 .tab.active.connected-custom1  { color: #eab308; }
 .tab.active.connected-custom2  { color: #eab308; }
 

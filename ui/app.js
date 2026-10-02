@@ -16,7 +16,7 @@ function switchTab(provider) {
 
 var _connectedClasses = [
   'connected-deepseek', 'connected-gemini', 'connected-qwen',
-  'connected-chatgpt', 'connected-claude',
+  'connected-chatgpt', 'connected-claude', 'connected-perplexity',
   'connected-custom1', 'connected-custom2'
 ];
 
@@ -414,7 +414,7 @@ function setSyncRunning(running) {
 }
 
 function setProviderSync(provider, status) {
-  var map = { 'gemini':'Gemini', 'qwen':'Qwen', 'chatgpt':'ChatGPT', 'claude':'Claude', 'deepseek':'DeepSeek',
+  var map = { 'gemini':'Gemini', 'qwen':'Qwen', 'chatgpt':'ChatGPT', 'claude':'Claude', 'perplexity':'Perplexity', 'deepseek':'DeepSeek',
               'custom1':'Custom1', 'custom2':'Custom2', 'profiler':'Profiler' };
   var dot = document.getElementById('pv' + map[provider]);
   if (!dot) return;
@@ -643,6 +643,15 @@ function openProfiler() {
   document.getElementById("profPhase").textContent = "";
   _profLastResults = null;
   refreshProfilerResume();
+  refreshProfilerCdp();
+}
+
+function refreshProfilerCdp() {
+  var warn = document.getElementById("profCdpWarn");
+  if (!window.pywebview || !warn) return;
+  window.pywebview.api.get_cdp_status().then(function(state) {
+    warn.classList.toggle("hidden", state === "running");
+  }, function() { warn.classList.remove("hidden"); });
 }
 
 function closeProfiler() {
@@ -668,6 +677,7 @@ function refreshProfilerResume() {
 
 function startProfiler(resume) {
   if (!window.pywebview) return;
+  refreshProfilerCdp();
   var url = (document.getElementById("profUrl").value || "").trim();
   var n = parseInt((document.getElementById("profChats").value || "5"), 10) || 5;
   var errBox = document.getElementById("profError");
@@ -1469,6 +1479,106 @@ function syncClaudeSelected() {
 function reconnectClaude() {
   log("reconnect Claude");
   addClaudeAccount();
+}
+
+// ── Perplexity ──
+
+function addPerplexityAccount() {
+  log("connecting Perplexity...");
+  if (window.pywebview) {
+    window.pywebview.api.connect_perplexity().then(
+      function() {
+        log("Perplexity connected");
+        setPerplexityConnected();
+      },
+      function(err) {
+        log("Perplexity connect failed: " + err);
+      }
+    );
+  }
+}
+
+function setPerplexityConnected() {
+  document.querySelector(".perplexity .badge").textContent = "1 подключено";
+  document.querySelector(".perplexity .badge").className = "badge ok";
+  document.getElementById("pxEmpty").style.display = "none";
+  document.getElementById("pxAccount").classList.remove("hidden");
+  document.getElementById("perplexityUrls").classList.remove("hidden");
+  document.getElementById("btnPerplexitySyncAll").disabled = false;
+  document.getElementById("btnPerplexitySyncSelected").disabled = false;
+  document.getElementById("pvPerplexity").className = "pv-dot dot-on";
+  setTabConnectionState('perplexity', true);
+  setBridgeStatus("perplexity connected");
+}
+
+function getActivePerplexityUrl() {
+  const textarea = document.getElementById("pxUrls");
+  const start = textarea.selectionStart;
+  const lines = textarea.value.split("\n");
+  let pos = 0;
+  for (let i = 0; i < lines.length; i++) {
+    pos += lines[i].length + 1;
+    if (start <= pos) {
+      let url = lines[i].trim();
+      if (url) {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+        return url;
+      }
+      break;
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    let url = lines[i].trim();
+    if (url) {
+      if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+      return url;
+    }
+  }
+  return "";
+}
+
+function _runPerplexitySync(urls, btn) {
+  btn.textContent = "Exporting...";
+  if (window.pywebview) {
+    window.pywebview.api.sync_perplexity(JSON.stringify(urls))
+      .then(function(resp) {
+        btn.textContent = btn.id === "btnPerplexitySyncAll"
+          ? "Синхронизировать Perplexity"
+          : "Синхронизировать выбранный чат";
+        if (resp && resp.ok) {
+          log("[PERPLEXITY] exported: " + resp.count + " msgs → " + resp.path);
+        } else {
+          log("[PERPLEXITY] export queued");
+        }
+        setBridgeStatus("ready");
+      })
+      .catch(function(err) {
+        btn.textContent = btn.id === "btnPerplexitySyncAll"
+          ? "Синхронизировать Perplexity"
+          : "Синхронизировать выбранный чат";
+        log("[PERPLEXITY ERROR] " + (err.message || err));
+      });
+  }
+}
+
+function syncPerplexityAll() {
+  log("Perplexity sync all: auto-discovering URLs from sidebar...");
+  _runPerplexitySync([], document.getElementById("btnPerplexitySyncAll"));
+}
+
+function syncPerplexitySelected() {
+  const url = getActivePerplexityUrl();
+  if (!url) {
+    log("no Perplexity URL selected");
+    return;
+  }
+  log("Perplexity sync selected: " + url.slice(0, 50) + "...");
+  _runPerplexitySync([url], document.getElementById("btnPerplexitySyncSelected"));
+}
+
+function reconnectPerplexity() {
+  log("reconnect Perplexity");
+  addPerplexityAccount();
 }
 
 document.addEventListener("DOMContentLoaded", function() {

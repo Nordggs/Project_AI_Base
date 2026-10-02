@@ -46,6 +46,7 @@ def mock_app():
         "qwen": threading.Lock(),
         "chatgpt": threading.Lock(),
         "claude": threading.Lock(),
+        "perplexity": threading.Lock(),
         "custom1": threading.Lock(),
         "custom2": threading.Lock(),
     }
@@ -54,6 +55,7 @@ def mock_app():
     app._sync_state = {
         "gemini": "idle", "qwen": "idle",
         "chatgpt": "idle", "claude": "idle", "deepseek": "idle",
+        "perplexity": "idle",
         "custom1": "idle", "custom2": "idle",
     }
     app._sync_done_events = {}
@@ -78,6 +80,7 @@ def mock_app():
     app.qwen_page = None
     app.chatgpt_page = None
     app.claude_page = None
+    app.perplexity_page = None
     app.custom1_page = None
     app.custom2_page = None
 
@@ -90,18 +93,22 @@ def mock_app():
     app._qwen_connected = False
     app._chatgpt_connected = False
     app._claude_connected = False
+    app._perplexity_connected = False
     app._gemini_connect_lock = False
     app._qwen_connect_lock = False
     app._chatgpt_connect_lock = False
     app._claude_connect_lock = False
+    app._perplexity_connect_lock = False
     app._connect_gemini_done = threading.Event()
     app._connect_qwen_done = threading.Event()
     app._connect_chatgpt_done = threading.Event()
     app._connect_claude_done = threading.Event()
+    app._connect_perplexity_done = threading.Event()
     app._gemini_export_active = False
     app._qwen_export_active = False
     app._chatgpt_export_active = False
     app._claude_export_active = False
+    app._perplexity_export_active = False
 
     # Custom provider connected flags
     app._custom1_connected = False

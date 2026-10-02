@@ -6,13 +6,13 @@
 
 ![AI Chat Exporter](ui/splash.png)
 
-Desktop application that exports AI chat dialogs (**ChatGPT, Gemini, Claude, Qwen, DeepSeek**) — plus two
+Desktop application that exports AI chat dialogs (**ChatGPT, Gemini, Claude, Qwen, DeepSeek, Perplexity**) — plus two
 user-configurable **Custom 1 / Custom 2** slots — into local Markdown files.
 Browser export needs no API keys; Custom API mode can use your own key. No cloud services, no HTTP server.
 
 ## Features
 
-- Export dialogs from **ChatGPT, Gemini, Claude, Qwen, DeepSeek**
+- Export dialogs from **ChatGPT, Gemini, Claude, Qwen, DeepSeek, Perplexity**
 - **Custom 1 / Custom 2** slots, each in one of two modes:
   - **Web Browser Export** — export any browser chat with user-defined CSS selectors or custom JS
   - **API** — send a prompt to an OpenAI- or Anthropic-compatible endpoint and save the response
@@ -25,20 +25,20 @@ Browser export needs no API keys; Custom API mode can use your own key. No cloud
 
 ## Download
 
-- **[AIChatExporter-Setup-0.7.1.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — installer with Desktop and Start Menu shortcuts (recommended)
-- **[AIChatExporter-Portable-0.7.1.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — portable build, no installation required
+- **[AIChatExporter-Setup-0.8.0.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — installer with Desktop and Start Menu shortcuts (recommended)
+- **[AIChatExporter-Portable-0.8.0.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — portable build, no installation required
 
 ## Installation
 
 ### Option 1 — Installer (recommended)
 
-1. Run `AIChatExporter-Setup-0.7.1.exe`
+1. Run `AIChatExporter-Setup-0.8.0.exe`
 2. Follow the wizard — Desktop and Start Menu shortcuts are created
 3. Launch **AI Chat Exporter**
 
 ### Option 2 — Portable
 
-Extract `AIChatExporter-Portable-0.7.1.zip` to any folder and run `AIChatExporter.exe`. Works without installation.
+Extract `AIChatExporter-Portable-0.8.0.zip` to any folder and run `AIChatExporter.exe`. Works without installation.
 
 ### From source
 
@@ -58,7 +58,7 @@ The app launches a browser (bundled Chromium or system Chrome) with `--remote-de
 You sign in to provider accounts in the opened browser window — the session is saved in the profile
 (`~/.ai_pipeline/chrome_gemini`), so you don't need to sign in again.
 
-### ChatGPT / Gemini / Claude / Qwen
+### ChatGPT / Gemini / Claude / Qwen / Perplexity
 
 1. Launch Chrome via the provider card (**🚀 Запустить Chrome**)
 2. Sign in to your account in the opened browser window
@@ -121,6 +121,7 @@ File name: `{service}_{stable_id[:8]}_{hash6}.md`
 │   ├── cdp_manager.py           # CDPManager (browser lifecycle) + CDPContext
 │   ├── chatgpt.py               # ChatGPTAdapter
 │   ├── claude.py                # ClaudeAdapter
+│   ├── perplexity.py            # PerplexityAdapter
 │   ├── qwen.py                  # QwenAdapter
 │   ├── gemini.py                # GeminiAdapter
 │   ├── deepseek.py              # DeepSeekAdapter
@@ -138,6 +139,7 @@ File name: `{service}_{stable_id[:8]}_{hash6}.md`
 │   ├── gemini_extract.py        # Gemini DOM extraction
 │   ├── chatgpt_extract.py       # ChatGPT DOM extraction
 │   ├── claude_extract.py        # Claude DOM extraction
+│   ├── perplexity_extract.py    # Perplexity DOM extraction
 │   ├── qwen_extract.py          # Qwen DOM extraction
 │   ├── deepseek.py              # DeepSeekExporter
 │   └── attachment_capture.py    # CDP attachment capture

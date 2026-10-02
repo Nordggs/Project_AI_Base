@@ -19,7 +19,7 @@ from core.profiler import orchestrator as orch_mod
 from core.profiler import run as run_mod
 from core.profiler import validation as validation_mod
 from core.profiler import worker as worker_mod
-from core.profiler.worker import ProfilerWorker, assemble_observations
+from core.profiler.worker import ProfilerWorker, assemble_observations, is_login_block_page
 
 URL = "https://example-ai.com/"
 
@@ -304,7 +304,7 @@ class TestWorkerRun:
             f.write('{"provider_url": "%s", "candidate_id": "c"}\n' % URL)
         assert checkpoint_mod.has_legacy_records(ckpt) is True
         worker = _mkworker(tmp_path)
-        worker.start(URL, resume=True)
+        worker.start(URL)
         worker._join()
         status = worker.get_status()
         assert status["phase"] == "failed"
@@ -321,3 +321,69 @@ class TestWorkerRun:
         status = worker.get_status()
         assert status["phase"] == "failed"
         assert "v1" in status["error"]
+
+
+    def test_legacy_checkpoint_refuses_fresh_start(self, tmp_path, monkeypatch):
+        _session(monkeypatch)
+        ckpt = checkpoint_mod.checkpoint_path(str(tmp_path))
+        with open(ckpt, "w", encoding="utf-8") as f:
+            f.write("not json at all\n")
+        worker = _mkworker(tmp_path)
+        worker.start(URL)
+        worker._join()
+        status = worker.get_status()
+        assert status["phase"] == "failed"
+        assert "v1" in status["error"]
+
+
+class TestLoginBlockDetect:
+    BLOCK_TEXT = ("Возможно, этот браузер или приложение небезопасны. "
+                  "Попробуйте сменить браузер.")
+    BLOCK_URL = ("https://accounts.google.com/signin/oauth/error"
+                 "?error=disallowed_useragent")
+
+    def test_russian_block_page(self):
+        assert is_login_block_page(self.BLOCK_URL, self.BLOCK_TEXT) is True
+
+    def test_english_block_page(self):
+        assert is_login_block_page(
+            self.BLOCK_URL,
+            "This browser or app may not be secure. "
+            "Try using a different browser.") is True
+
+    def test_disallowed_useragent_matches_any_host(self):
+        assert is_login_block_page(
+            "https://example-ai.com/login",
+            "Error 403: disallowed_useragent") is True
+
+    def test_ordinary_google_page_not_matched(self):
+        assert is_login_block_page(
+            "https://accounts.google.com/signin",
+            "Sign in to continue to your account") is False
+
+    def test_quote_on_non_google_page_not_matched(self):
+        assert is_login_block_page(
+            "https://example-ai.com/help", self.BLOCK_TEXT) is False
+
+    def test_garbage_never_matches(self):
+        assert is_login_block_page(None, None) is False
+        assert is_login_block_page("", "") is False
+
+    def test_worker_fails_with_actionable_error(self, tmp_path, monkeypatch):
+        browser, page = _session(monkeypatch, owned=True)
+        page.url = self.BLOCK_URL
+        page.evaluate.return_value = self.BLOCK_TEXT
+        monkeypatch.setattr(
+            orch_mod, "probe_chat_list",
+            lambda page, log=None: {"hits": {}, "best_sel": "",
+                                    "items": [], "empty_title": {}})
+        worker = _mkworker(tmp_path)
+        worker.start(URL)
+        assert _wait_status(worker, "awaiting_login") == "awaiting_login"
+        worker.continue_after_login()
+        worker._join()
+        status = worker.get_status()
+        assert status["phase"] == "failed"
+        assert "Запустить Chrome" in status["error"]
+        page.close.assert_called_once_with()
+        browser.close.assert_called_once_with()

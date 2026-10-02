@@ -22,6 +22,7 @@ class ExportWriter:
         "claude": "Claude",
         "gemini": "Gemini",
         "qwen": "Qwen",
+        "perplexity": "Perplexity",
         "custom1": "Custom 1",
         "custom2": "Custom 2",
     }
@@ -59,7 +60,7 @@ class ExportWriter:
 
     def _stable_id(self, data):
         cid = data.get("chat_id") or data.get("id")
-        if cid and not re.match(r'^(claude|chatgpt|qwen|deepseek)-\d+$', str(cid)):
+        if cid and not re.match(r'^(claude|chatgpt|qwen|deepseek|perplexity)-\d+$', str(cid)):
             return self._sanitize_filename(str(cid))[:40]
         url = data.get("url") or data.get("source_url")
         if url:

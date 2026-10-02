@@ -43,6 +43,7 @@ __all__ = [
     "PHASE_CANCELLED",
     "ProfilerWorker",
     "assemble_observations",
+    "is_login_block_page",
 ]
 
 PHASE_IDLE = "idle"
@@ -67,6 +68,40 @@ PHASE_LABELS = {
 }
 
 DEFAULT_LOGIN_TIMEOUT_S = 600
+
+# Google answers automation-controlled browsers with its "browser or app
+# may not be secure" page (OAuth Error 403: disallowed_useragent). Probing
+# further is pointless — fail fast with actionable instructions instead
+# of a cryptic no-chats result.
+_LOGIN_BLOCK_HOST = "accounts.google."
+_LOGIN_BLOCK_PHRASES = (
+    "этот браузер или приложение небезопасны",
+    "this browser or app may not be secure",
+    "try using a different browser",
+    "смените браузер",
+    "couldn't sign you in",
+    "не удалось войти",
+    "disallowed_useragent",
+)
+
+
+def is_login_block_page(url, text):
+    """True when the page is Google's automation-login block (pure).
+
+    Gated on a Google accounts host (or the disallowed_useragent marker,
+    which only Google emits) so ordinary pages merely quoting the text
+    never match. Never raises.
+    """
+    try:
+        page_url = (url or "").lower()
+        body = (text or "").lower()
+        if "disallowed_useragent" in body:
+            return True
+        if _LOGIN_BLOCK_HOST not in page_url:
+            return False
+        return any(phrase in body for phrase in _LOGIN_BLOCK_PHRASES)
+    except Exception:
+        return False
 
 
 def assemble_observations(provider_url, chat, nav, opened,
@@ -206,6 +241,18 @@ class ProfilerWorker:
         with self._lock:
             return self._cancel_flag
 
+    def _detect_login_block(self, page):
+        """Check the live page for Google's automation-login block."""
+        try:
+            page_url = page.url or ""
+        except Exception:
+            return False
+        try:
+            text = page.evaluate("document.documentElement.innerText") or ""
+        except Exception:
+            text = ""
+        return is_login_block_page(page_url, text if isinstance(text, str) else "")
+
     def _set_status(self, **fields):
         with self._lock:
             self._status.update(fields)
@@ -304,6 +351,13 @@ class ProfilerWorker:
             # empty account simply flows into the no-chats path below.
             self._phase(PHASE_FINDING_CHATS, url)
             chat = orchestrator.probe_chat_list(page, self._log)
+            if self._detect_login_block(page):
+                self._finish_failed(
+                    "Google заблокировал вход в этом окне "
+                    "(«браузер или приложение небезопасны»): запустите Chrome "
+                    "через приложение (кнопка «Запустить Chrome»), войдите "
+                    "в аккаунт там и запустите профилирование заново.")
+                return
 
         if self._cancelled():
             return self._finish_cancelled()
