@@ -25,20 +25,20 @@ Browser export needs no API keys; Custom API mode can use your own key. No cloud
 
 ## Download
 
-- **[AIChatExporter-Setup-0.8.0.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — installer with Desktop and Start Menu shortcuts (recommended)
-- **[AIChatExporter-Portable-0.8.0.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — portable build, no installation required
+- **[AIChatExporter-Setup-0.8.1.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — installer with Desktop and Start Menu shortcuts (recommended)
+- **[AIChatExporter-Portable-0.8.1.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — portable build, no installation required
 
 ## Installation
 
 ### Option 1 — Installer (recommended)
 
-1. Run `AIChatExporter-Setup-0.8.0.exe`
+1. Run `AIChatExporter-Setup-0.8.1.exe`
 2. Follow the wizard — Desktop and Start Menu shortcuts are created
 3. Launch **AI Chat Exporter**
 
 ### Option 2 — Portable
 
-Extract `AIChatExporter-Portable-0.8.0.zip` to any folder and run `AIChatExporter.exe`. Works without installation.
+Extract `AIChatExporter-Portable-0.8.1.zip` to any folder and run `AIChatExporter.exe`. Works without installation.
 
 ### From source
 

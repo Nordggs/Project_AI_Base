@@ -13,8 +13,16 @@ Findings (Iteration 1, verified on live DOM, 19 chats):
   One answer may be split across 2-3 consecutive ``.prose`` blocks — merged.
 - Sources: ``.citation`` elements (domain + counter). Collected into meta and
   appended to the last assistant message as ``[sources: ...]``.
-- Empty/deleted threads render the home screen ("What do you want to know").
+- Related questions: ``label.relative.cursor-pointer`` (engine chips like
+  "Computer" are filtered out). Appended to the last assistant message as a
+  ``Related:`` block (paste order: answer → related → sources).
 - ``goto()`` on a deep link hydrates fine (== click-FSM) → goto is primary.
+- History loading: a fresh render contains the LATEST turn only (server-side
+  window — old answers are absent even from raw HTML). Older turns are fetched
+  when the user climbs up with trusted wheel events (Phase 0: 8x wheel(0,-300)
+  triggered the fetch; passive waiting, programmatic scrollTop, focus, reload,
+  re-click all inert; mouse.wheel without positioning the mouse is a no-op).
+  See ``PerplexityAdapter._climb_history``.
 """
 
 import re
@@ -54,7 +62,12 @@ PERPLEXITY_EXTRACT_JS = """
         if (typeof el.className === 'string' && el.className.includes('group/user-bubble'))
             items.push({el, role: 'user'});
     });
-    document.querySelectorAll('div.prose').forEach(el => items.push({el, role: 'assistant'}));
+    // Skip research-step cards (transient collapsible UI, not part of the
+    // pasted/visible answer; final answers live under group/final-text).
+    document.querySelectorAll('div.prose').forEach(el => {
+        if (el.closest('[class*="step"]')) return;
+        items.push({el, role: 'assistant'});
+    });
     items.sort((a, b) => {
         const pos = a.el.compareDocumentPosition(b.el);
         if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
@@ -79,7 +92,38 @@ PERPLEXITY_EXTRACT_JS = """
     const cites = [...new Set([...document.querySelectorAll('.citation')]
         .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 60))
         .filter(Boolean))].slice(0, 30);
-    return {messages, citations: cites, title: document.title || ''};
+    const related = [...new Set([...document.querySelectorAll('label.relative.cursor-pointer')]
+        .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' '))
+        .filter(t => t && t !== 'Computer'))].slice(0, 12);
+    return {messages, citations: cites, related, title: document.title || ''};
+}
+"""
+
+PERPLEXITY_TURNS_FP_JS = """
+() => {
+    const c = document.querySelector('.scrollable-container');
+    const bubbles = [...document.querySelectorAll('[class*="user-bubble"]')]
+        .filter(e => typeof e.className === 'string' && e.className.includes('group/user-bubble'))
+        .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' '));
+    const prose = [...document.querySelectorAll('div.prose')]
+        .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' '));
+    return {
+        nb: bubbles.length, np: prose.length,
+        b0: (bubbles[0] || '').slice(0, 80),
+        blast: (bubbles[bubbles.length - 1] || '').slice(0, 80),
+        plast: (prose[prose.length - 1] || '').slice(0, 80),
+        top: c ? Math.round(c.scrollTop) : -1,
+        sh: c ? c.scrollHeight : -1,
+    };
+}
+"""
+
+PERPLEXITY_CONTAINER_RECT_JS = """
+() => {
+    const c = document.querySelector('.scrollable-container');
+    if (!c) return null;
+    const r = c.getBoundingClientRect();
+    return {cx: Math.round(r.x + r.width / 2), cy: Math.round(r.y + 200)};
 }
 """
 
@@ -133,6 +177,21 @@ def merge_same_role(messages) -> list[dict]:
     return merged
 
 
+def fp_key(fp) -> tuple | None:
+    """History-stability signature: ``(nb, np, head_first, head_last)``.
+
+    Used by the climb loop: identical keys across polls mean no new turns
+    arrived. Returns None for garbage input (counts as unstable).
+    """
+    if not isinstance(fp, dict):
+        return None
+    try:
+        return (int(fp.get("nb", -1)), int(fp.get("np", -1)),
+                str(fp.get("b0") or "")[:80], str(fp.get("plast") or "")[:80])
+    except (TypeError, ValueError):
+        return None
+
+
 def is_home_screen(page) -> bool:
     """True when the page shows the Perplexity home (empty/deleted thread)."""
     try:
@@ -172,10 +231,14 @@ def extract_perplexity_dom(page, url, log_progress=None, cancel_check=None) -> d
         return None
 
     citations = [c for c in (data.get("citations") or []) if c]
-    if citations:
+    related = [r for r in (data.get("related") or []) if r]
+    if citations or related:
         for m in reversed(messages):
             if m["role"] == "assistant":
-                m["content"] += "\n\n[sources: " + ", ".join(citations[:15]) + "]"
+                if related:
+                    m["content"] += "\n\nRelated:\n" + "\n".join(f"- {r}" for r in related)
+                if citations:
+                    m["content"] += "\n\n[sources: " + ", ".join(citations[:15]) + "]"
                 break
 
     chat_id = ""

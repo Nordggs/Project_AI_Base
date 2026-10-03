@@ -24,6 +24,26 @@ UUID1 = "52c2317c-b992-4a4d-aae4-1e1374cca2e2"
 UUID2 = "c32e6994-cd69-4442-b01d-20ff18475efe"
 
 
+class FakeMouse:
+    """Records move/wheel calls (Phase 0: unpositioned wheel is a no-op)."""
+
+    def __init__(self, fail_move=False, fail_wheel=False):
+        self.moved = []
+        self.wheels = []
+        self._fail_move = fail_move
+        self._fail_wheel = fail_wheel
+
+    def move(self, x, y):
+        if self._fail_move:
+            raise RuntimeError("no mouse")
+        self.moved.append((x, y))
+
+    def wheel(self, dx, dy):
+        if self._fail_wheel:
+            raise RuntimeError("no wheel")
+        self.wheels.append((dx, dy))
+
+
 class FakePage:
     """Minimal scriptable page stub (evaluate by JS marker)."""
 
@@ -32,11 +52,23 @@ class FakePage:
         self.url = url
         self.goto_calls = []
         self.waited = []
+        self.mouse = FakeMouse()
 
     def evaluate(self, js, *args):
+        if "plast" in js and "FP" in self._script:
+            resp = self._script["FP"]
+            return resp() if callable(resp) else resp
+        if "getBoundingClientRect" in js and "RECT" in self._script:
+            resp = self._script["RECT"]
+            return resp() if callable(resp) else resp
         for marker, resp in self._script.items():
+            if marker in ("FP", "RECT", "__wait_turns__"):
+                continue
             if marker in js:
                 return resp() if callable(resp) else resp
+        # WAIT_TURNS_JS contains 'user-bubble' (also present in FP_JS/EXTRACT_JS)
+        if "user-bubble" in js and "__wait_turns__" in self._script:
+            return True
         raise AssertionError(f"unexpected evaluate: {js[:80]}")
 
     def goto(self, url, **kwargs):
@@ -219,11 +251,17 @@ class TestAdapter:
 
     def test_open_chat_goto_primary(self):
         page = FakePage(url="https://www.perplexity.ai/",
-                        script={"__wait_turns__": True})
+                        script={"__wait_turns__": True,
+                                "RECT": {"cx": 100, "cy": 200},
+                                "FP": {"nb": 1, "np": 1, "b0": "q", "blast": "q",
+                                       "plast": "a", "top": 0, "sh": 100}})
         a = _adapter(page)
         ok = a.open_chat({"url": "/search/" + UUID1, "title": "t", "_index": 0, "id": UUID1})
         assert ok is True
         assert page.url.endswith(UUID1)
+        # climb ran: mouse positioned first (Phase 0 no-op guard), then wheels
+        assert page.mouse.moved == [(100, 200)]
+        assert page.mouse.wheels == [(0, -2000)] * 2
 
     def test_open_chat_empty_thread_false(self):
         class HomePage(FakePage):
@@ -265,6 +303,134 @@ class TestAdapter:
         page = FakePage(url="https://www.perplexity.ai/",
                         script={"compareDocumentPosition": {"messages": [], "citations": [], "title": ""}})
         assert _adapter(page).extract_chat({}) is None
+
+
+class TestFpKey:
+    def test_valid_fp(self):
+        from exporters.perplexity_extract import fp_key
+        fp = {"nb": 2, "np": 3, "b0": "q1 text", "blast": "q2 text",
+              "plast": "a2 text", "top": 100, "sh": 5000}
+        assert fp_key(fp) == (2, 3, "q1 text", "a2 text")
+
+    def test_garbage_is_not_stable(self):
+        from exporters.perplexity_extract import fp_key
+        assert fp_key(None) is None
+        assert fp_key("x") is None
+        assert fp_key([1, 2]) is None
+
+
+class TestRelated:
+    def test_js_collects_labels_and_filters_computer(self):
+        """Phase 0: related = label.relative.cursor-pointer minus engine chips."""
+        from exporters import perplexity_extract as px
+        assert "label.relative.cursor-pointer" in px.PERPLEXITY_EXTRACT_JS
+        assert "Computer" in px.PERPLEXITY_EXTRACT_JS
+
+    def test_js_skips_research_step_cards(self):
+        """Transient step cards must not become leading assistant messages."""
+        from exporters import perplexity_extract as px
+        assert '[class*="step"]' in px.PERPLEXITY_EXTRACT_JS
+
+    def test_related_appended(self):
+        # payload mimics post-JS shape (JS already filtered/deduped)
+        payload = {"messages": [{"role": "user", "content": "q", "timestamp": None},
+                                {"role": "assistant", "content": "a", "timestamp": None}],
+                   "citations": ["example +1"], "related": ["Why x?", "How y?"],
+                   "title": "t"}
+        page = FakePage(script={"compareDocumentPosition": payload})
+        data = extract_perplexity_dom(page, "https://www.perplexity.ai/search/" + UUID1)
+        body = data["messages"][-1]["content"]
+        assert "Related:\n- Why x?\n- How y?" in body
+        # paste order: answer -> related -> sources
+        assert body.index("Related:") < body.index("[sources: example +1]")
+
+    def test_no_related_no_block(self):
+        payload = {"messages": [{"role": "assistant", "content": "a", "timestamp": None}],
+                   "citations": [], "related": [], "title": "t"}
+        page = FakePage(script={"compareDocumentPosition": payload})
+        data = extract_perplexity_dom(page, "https://www.perplexity.ai/search/" + UUID1)
+        assert "Related:" not in data["messages"][-1]["content"]
+
+
+def _fp_seq(*seq):
+    it = iter(seq)
+    return lambda: next(it)
+
+
+class TestClimb:
+    def _page(self, fps, rect=None):
+        return FakePage(script={"FP": _fp_seq(*fps),
+                                "RECT": rect if rect is not None else {"cx": 50, "cy": 60}})
+
+    def test_stable_at_top_stops(self):
+        fp = {"nb": 1, "np": 1, "b0": "q", "blast": "q", "plast": "a", "top": 0, "sh": 100}
+        page = self._page([fp, fp, fp, fp, fp])
+        a = _adapter(page)
+        a._climb_history(budget_s=25, interval_ms=1, need_stable=3)
+        assert page.mouse.moved == [(50, 60)]
+        assert page.mouse.wheels == [(0, -2000)] * 2
+
+    def test_growth_resets_stability(self):
+        k1 = {"nb": 1, "np": 1, "b0": "q2", "blast": "q2", "plast": "a2", "top": 0, "sh": 100}
+        k2 = {"nb": 2, "np": 2, "b0": "q1", "blast": "q2", "plast": "a2b", "top": 0, "sh": 200}
+        page = self._page([k1, k1, k2, k2, k2, k2])
+        a = _adapter(page)
+        a._climb_history(budget_s=25, interval_ms=1, need_stable=3)
+        # k1,k1 (stable 2, reset) then k2 x4 -> stop at 3rd k2: 2+3 wheels
+        assert len(page.mouse.wheels) == 4
+
+    def test_top_required_despite_stability(self):
+        fp = {"nb": 1, "np": 1, "b0": "q", "blast": "q", "plast": "a", "top": 500, "sh": 5000}
+        page = self._page([fp] * 10)
+        a = _adapter(page)
+        a._climb_history(budget_s=0.05, interval_ms=1, need_stable=3)
+        # never at top -> burns budget instead of stopping early
+        assert len(page.mouse.wheels) > 3
+
+    def test_budget_exhaustion(self):
+        fp = {"nb": 1, "np": 1, "b0": "q", "blast": "q", "plast": "a", "top": 0, "sh": 100}
+        page = self._page([fp] * 50)
+        logs = []
+        a = PerplexityAdapter(page, threading.Lock(), logs.append, lambda: False)
+        a._climb_history(budget_s=0, interval_ms=1, need_stable=3)
+        assert page.mouse.wheels == []
+        assert any("budget" in m for m in logs)
+
+    def test_cancel_stops(self):
+        fp = {"nb": 1, "np": 1, "b0": "q", "blast": "q", "plast": "a", "top": 500, "sh": 5000}
+        page = self._page([fp] * 10)
+        a = _adapter(page, cancel=lambda: True)
+        a._climb_history(budget_s=25, interval_ms=1, need_stable=3)
+        assert page.mouse.wheels == []
+
+    def test_evaluate_errors_tolerated(self):
+        class ErrPage(FakePage):
+            def evaluate(self, js, *a):
+                raise RuntimeError("boom")
+        page = ErrPage()
+        logs = []
+        a = PerplexityAdapter(page, threading.Lock(), logs.append, lambda: False)
+        a._climb_history(budget_s=0, interval_ms=1, need_stable=3)  # must not raise
+        assert page.mouse.wheels == []
+
+    def test_no_rect_still_wheels(self):
+        fp = {"nb": 1, "np": 1, "b0": "q", "blast": "q", "plast": "a", "top": 0, "sh": 100}
+        page = FakePage(script={"FP": _fp_seq(*([fp] * 5)), "RECT": None})
+        logs = []
+        a = PerplexityAdapter(page, threading.Lock(), logs.append, lambda: False)
+        a._climb_history(budget_s=25, interval_ms=1, need_stable=3)
+        assert page.mouse.moved == []
+        assert len(page.mouse.wheels) == 2
+        assert any("no container rect" in m for m in logs)
+
+    def test_move_failure_proceeds(self):
+        fp = {"nb": 1, "np": 1, "b0": "q", "blast": "q", "plast": "a", "top": 0, "sh": 100}
+        page = FakePage(script={"FP": _fp_seq(*([fp] * 5)),
+                                "RECT": {"cx": 10, "cy": 20}})
+        page.mouse = FakeMouse(fail_move=True)
+        a = _adapter(page)
+        a._climb_history(budget_s=25, interval_ms=1, need_stable=3)
+        assert len(page.mouse.wheels) == 2
 
 
 class TestWriterIntegration:

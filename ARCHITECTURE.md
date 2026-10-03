@@ -1,4 +1,4 @@
-# Architecture — AI Chat Exporter v0.8.0
+# Architecture — AI Chat Exporter v0.8.1
 
 ## Overview
 

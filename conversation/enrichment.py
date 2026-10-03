@@ -51,6 +51,16 @@ class EnrichmentStats:
         return self.cdp_strict + self.cdp_temporal + self.runtime + self.partial
 
 
+def _num(ts):
+    """Numeric timestamp or None.
+
+    Providers may supply display-only strings (e.g. Perplexity "HH:MM").
+    Temporal windowing needs epoch floats — anything else behaves like
+    a missing timestamp (no arithmetic, no comparisons).
+    """
+    return ts if isinstance(ts, (int, float)) else None
+
+
 class Enricher:
     """Pure: deepcopy model → 3-layer merge → (new_model, stats)."""
 
@@ -65,7 +75,7 @@ class Enricher:
         model = copy.deepcopy(model)
         stats = EnrichmentStats()
 
-        first_ts = model.messages[0].timestamp if model.messages else None
+        first_ts = _num(model.messages[0].timestamp) if model.messages else None
         if first_ts is None:
             perf_epoch_offset = 0.0
         else:
@@ -79,7 +89,7 @@ class Enricher:
         cdp_snapshot = list(cdp_assets)
 
         for i, msg in enumerate(model.messages):
-            t0 = msg.timestamp
+            t0 = _num(msg.timestamp)
 
             cdp_in_window = []
             imgs_in_window = []
@@ -87,7 +97,7 @@ class Enricher:
 
             if t0 is not None:
                 if i + 1 < len(model.messages):
-                    t1 = model.messages[i + 1].timestamp
+                    t1 = _num(model.messages[i + 1].timestamp)
                 else:
                     t1 = None
 

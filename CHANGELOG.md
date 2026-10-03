@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.8.1 — Perplexity bugfix: полная история и таймстампы (TICKET-004, 2026-10-03)
+### Fixed
+- **Экспортировался только последний терн (неполная история Perplexity)**: свежий рендер отдаёт лишь свежий терн (серверное окно — старые ответы отсутствуют даже в raw HTML). `open_chat` теперь «поднимает» историю доверенным колесом — `_climb_history()`: мышь в центр `.scrollable-container`, `wheel` вверх, стабилизация сигнатуры тернов `(nb, np, head первого, head последнего)`, стоп на `top≈0` + 3 одинаковых подписях, бюджет 25с (honest partial). Программный `scrollTop`, пассивное ожидание, reload и re-click инертны — триггер срабатывает только на доверенное wheel-событие.
+- **Research-step карточки попадали в экспорт**: `div.prose` внутри `[class*="step"]` пропускается (финальные ответы живут под `group/final-text`).
+- **Related-вопросы**: `label.relative.cursor-pointer` (шильдики движка «Computer» отфильтрованы) добавляются отдельным блоком `Related:` перед `[sources]`.
+- **Crash при экспорте Perplexity** `unsupported operand type(s) for -: 'str' and 'float'`: строковые таймстампы `"HH:MM"` больше не ломают общий `Enricher` — хелпер `_num()` считает нечисловые таймстампы отсутствующими (temporal-привязка скипается, вложения → `partial`); числовой путь не изменён.
+### Tests
+- `tests/test_perplexity.py` (+13: `fp_key`, стражи Related, 8 climb-кейсов) и новый `tests/test_enrichment_timestamps.py` (6 тестов: repro, all-strings, mixed, numeric-unchanged, `_num`-юниты).
+
 ## v0.8.0 — Perplexity provider (TICKET-004, 2026-10-02)
 ### New
 - **Perplexity как отдельный провайдер**: 8-я вкладка в UI (карточка, точка состояния, Connect / Sync) через общий CDP-браузер `_gw_worker` (паттерн Gemini/Qwen).

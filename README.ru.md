@@ -25,20 +25,20 @@
 
 ## Скачать
 
-- **[AIChatExporter-Setup-0.8.0.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — установщик с ярлыками Desktop и Start Menu (рекомендуется)
-- **[AIChatExporter-Portable-0.8.0.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — портативная сборка, работает без установки
+- **[AIChatExporter-Setup-0.8.1.exe](https://github.com/Nordggs/Project_AI_Base/releases)** — установщик с ярлыками Desktop и Start Menu (рекомендуется)
+- **[AIChatExporter-Portable-0.8.1.zip](https://github.com/Nordggs/Project_AI_Base/releases)** — портативная сборка, работает без установки
 
 ## Установка
 
 ### Вариант 1 — Установщик (рекомендуется)
 
-1. Запустите `AIChatExporter-Setup-0.8.0.exe`
+1. Запустите `AIChatExporter-Setup-0.8.1.exe`
 2. Следуйте инструкциям — создаются ярлыки Desktop и Start Menu
 3. Запустите **AI Chat Exporter**
 
 ### Вариант 2 — Portable
 
-Распакуйте `AIChatExporter-Portable-0.8.0.zip` в любую папку и запустите `AIChatExporter.exe`. Работает без установки.
+Распакуйте `AIChatExporter-Portable-0.8.1.zip` в любую папку и запустите `AIChatExporter.exe`. Работает без установки.
 
 ### Из исходников
 
